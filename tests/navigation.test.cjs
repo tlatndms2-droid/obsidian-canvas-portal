@@ -20,3 +20,30 @@ test('navigation follows a single selected portal; otherwise exits only from an 
  assert.equal(p.navigationAction(session([],{current:'p',busy:true})),null);
  assert.equal(p.navigationAction(session([],{current:'p',preview:{}})),null);
 });
+
+test('one physical keydown cannot leave and re-enter, even after the first transition finishes',async()=>{
+ const plugin=Object.create(box.module.exports.prototype),calls=[];
+ const event={type:'keydown'},s={c:{wrapperEl:{ownerDocument:{defaultView:{event}}}}};
+ plugin.leave=async()=>{calls.push('leave');};
+ plugin.transition=()=>calls.push('enter');
+ await plugin.navigate(s,{back:'virtual'});
+ plugin.navigate(s,{portal:{role:'entry'}},event);
+ assert.deepEqual(calls,['leave']);
+ plugin.navigate(s,{portal:{role:'entry'}},{type:'keydown'});
+ assert.deepEqual(calls,['leave','enter']);
+ // Non-keyboard command invocations must remain independent.
+ s.c.wrapperEl.ownerDocument.defaultView.event=undefined;
+ await plugin.navigate(s,{back:'virtual'});await plugin.navigate(s,{back:'virtual'});
+ assert.deepEqual(calls,['leave','enter','leave','leave']);
+});
+
+test('entry selects the leftmost card, breaks ties upward, and excludes exits and group frames',()=>{
+ const card=(id,x,y,type='text',role)=>({id,x,y,getData:()=>({id,x,y,type,canvasPortalRef:role?{id:'p',role}:undefined})});
+ const cards=[card('right',30,0),card('lower',-20,50),card('upper',-20,-50),card('exit',-100,-100,'text','exit'),card('group',-200,-200,'group')];
+ let selected;
+ const s={c:{nodes:new Map(cards.map(n=>[n.id,n])),selectOnly:n=>selected=n.id,deselectAll:()=>selected=null}};
+ p.selectLeftmostCard(s);assert.equal(selected,'upper');
+ const nested=card('nested',-30,0,'text','entry');s.c.nodes.set(nested.id,nested);
+ p.selectLeftmostCard(s);assert.equal(selected,'nested');
+ s.c.nodes=new Map(cards.slice(3).map(n=>[n.id,n]));p.selectLeftmostCard(s);assert.equal(selected,null);
+});

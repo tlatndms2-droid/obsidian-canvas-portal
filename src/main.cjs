@@ -86,7 +86,7 @@ module.exports = class CanvasPortal extends Plugin {
       const customized = manager?.getHotkeys(commandId);
       const hotkeys = customized === undefined ? [{ modifiers: ['Ctrl'], key: 'Enter' }] : customized;
       if (!hotkeys.some(h => this.matchesKey(e, h))) return;
-      e.preventDefault(); e.stopImmediatePropagation(); this.navigate(s, action);
+      e.preventDefault(); e.stopImmediatePropagation(); this.navigate(s, action, e);
     };
     window.addEventListener('keydown', this.keyHandler, true);
     this.register(() => window.removeEventListener('keydown', this.keyHandler, true));
@@ -161,7 +161,18 @@ module.exports = class CanvasPortal extends Plugin {
     if([...s.c.selection].some(n=>s.c.nodes.has(n.id)&&n.getData&&M.ref(n.getData())))return null;
     return s.current ? {back:'virtual'} : s.linkBack ? {back:'link'} : null;
   }
-  navigate(s,action){if(action.portal)return this.transition(s,action.portal);return action.back==='virtual'?this.leave(s):this.leaveLink(s);}
+  navigate(s,action,event=s.c.wrapperEl?.ownerDocument?.defaultView?.event){
+    // Obsidian's command handler and our capture listener can receive the same
+    // keydown, with a completed async transition between them. Consume its
+    // identity once so leaving cannot immediately enter the selected portal again.
+    if(event?.type==='keydown'){
+      this.navigationEvents ||= new WeakSet();
+      if(this.navigationEvents.has(event))return;
+      this.navigationEvents.add(event);
+    }
+    if(action.portal)return this.transition(s,action.portal);
+    return action.back==='virtual'?this.leave(s):this.leaveLink(s);
+  }
   portal(s,id){return s.root.canvasPortal?.portals[id] || (s.linkBack?.id===id?s.linkBack.owner.root.canvasPortal.portals[id]:null);}
   addPortalMenu(s,menu){
     if(s.preview||s.c.readonly||menu.canvasPortalAdded)return;menu.canvasPortalAdded=true;
@@ -467,6 +478,13 @@ module.exports = class CanvasPortal extends Plugin {
     this.queue(s);
   }
   transition(s, r) {if(r.role==='entry')return this.enter(s,r.id);if(r.role==='exit'&&s.current===r.id)return this.leave(s);if(r.role==='exit'&&s.linkBack?.id===r.id)return this.leaveLink(s);}
+  selectLeftmostCard(s){
+    const cards=[...s.c.nodes.values()].filter(n=>{
+      const data=n.getData();return data.type!=='group'&&M.ref(data)?.role!=='exit';
+    });
+    cards.sort((a,b)=>a.x-b.x||a.y-b.y||String(a.id).localeCompare(String(b.id)));
+    if(cards.length)s.c.selectOnly(cards[0]);else s.c.deselectAll();
+  }
   async enter(s, id) {
     if (s.busy) return; s.busy = true;
     try {
@@ -476,7 +494,7 @@ module.exports = class CanvasPortal extends Plugin {
       await s.v.save();
       this.rememberHistory(s);
       s.stack.push({parentId:s.current});s.current = id; this.show(s, p.graph); this.decorate(s);
-      s.c.zoomToFit();
+      this.selectLeftmostCard(s);s.c.zoomToFit();
       s.c.wrapperEl.focus(); await s.v.save();
     } catch (e) { this.notifyError(e); } finally { s.busy = false; }
   }
@@ -502,7 +520,7 @@ module.exports = class CanvasPortal extends Plugin {
       await owner.v.save();
       s.linkBack={owner,id:p.id,leaf,sourceText,baseline:JSON.stringify(s.root)};
       const cached=owner.histories.get('link:'+p.id);if(cached)s.histories.set('main',M.clone(cached));
-      this.show(s,this.displayData(s));this.decorate(s);s.c.zoomToFit();s.c.wrapperEl.focus();
+      this.show(s,this.displayData(s));this.decorate(s);this.selectLeftmostCard(s);s.c.zoomToFit();s.c.wrapperEl.focus();
     }catch(e){leaf.detach();throw e;}
   }
   async leaveLink(s){
