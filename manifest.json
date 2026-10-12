@@ -1,0 +1,9 @@
+{
+  "id": "canvas-portal",
+  "name": "Canvas Portal",
+  "version": "0.4.0",
+  "minAppVersion": "1.14.4",
+  "description": "Canvas 자료를 Select·Group·Link 포탈로 정리합니다. 4단계 Sandbox 검증 빌드.",
+  "author": "tlatn",
+  "isDesktopOnly": true
+}

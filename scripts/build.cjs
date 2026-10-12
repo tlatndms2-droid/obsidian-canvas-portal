@@ -1,0 +1,18 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const root = path.resolve(__dirname, '..');
+const model = fs.readFileSync(path.join(root, 'src/model.cjs'), 'utf8');
+const source = fs.readFileSync(path.join(root, 'src/main.cjs'), 'utf8');
+const inline=text=>`(()=>{const module={exports:{}};${text}\nreturn module.exports;})()`;
+const backup=fs.readFileSync(path.join(root,'src/backup.cjs'),'utf8').replace("const M=require('./model.cjs');",'');
+const result = source.replace('require("./model.cjs")', inline(model)).replace('require("./backup.cjs")',inline(backup));
+new vm.Script(result, { filename: 'main.js' });
+const smoke={module:{exports:{}},require:id=>id==='obsidian'?{Plugin:class{},PluginSettingTab:class{},Modal:class{},Setting:class{},Notice:class{},setIcon:()=>{}}:require(id)};
+vm.runInNewContext(result,smoke,{filename:'main.js'});
+if(typeof smoke.module.exports!=='function')throw Error('Plugin module did not load');
+const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
+const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+if (manifest.version !== pkg.version) throw Error('Version mismatch');
+fs.writeFileSync(path.join(root, 'main.js'), result);
+console.log(`Built Canvas Portal ${manifest.version}: ${Buffer.byteLength(result)} bytes`);

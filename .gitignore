@@ -1,0 +1,6 @@
+node_modules/
+.validation/
+main.js
+HANDOFF.md
+VALIDATION_*.md
+STAGE*_USER_CHECK.md
