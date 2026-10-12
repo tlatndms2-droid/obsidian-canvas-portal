@@ -44,11 +44,12 @@ function createPortal(data, selectedIds, name, parentId=null, requestedType=null
   const maxY = Math.max(...selected.map(n => n.y + n.height));
   const portalId = uid(), entryId = type==='select'?uid():direct[0].id, exitId = uid();
   const displayId = nextId(root);
-  const portalName = type==='link'?fileTitle(direct[0].file):title(name);
+  const portalName = type==='link'?fileTitle(direct[0].file):title(type==='group'?direct[0].label:name);
   const entry = { id: entryId, type: 'text', x: (minX + maxX) / 2 - 140, y: (minY + maxY) / 2 - 80, width: 280, height: 160, text: cardText(portalName, displayId), canvasPortalRef: { id: portalId, role: 'entry' } };
   const exit = { id: exitId, type: 'text', x: minX - 320, y: minY - 190, width: 280, height: 160, text: cardText(portalName, displayId), canvasPortalRef: { id: portalId, role: 'exit' } };
   const originalEntry=type==='select'?null:clone(direct[0]);
-  if(originalEntry)Object.assign(entry,{x:originalEntry.x,y:originalEntry.y,width:originalEntry.width,height:originalEntry.height});
+  if(originalEntry)Object.assign(entry,{x:originalEntry.x,y:originalEntry.y});
+  if(type==='link')Object.assign(entry,{width:originalEntry.width,height:originalEntry.height});
   const internalEdges = parent.edges.filter(e => ids.has(e.fromNode) && ids.has(e.toNode));
   parent.edges = parent.edges.filter(e => !internalEdges.includes(e)).map(e => ({ ...e, fromNode: ids.has(e.fromNode) ? entryId : e.fromNode, toNode: ids.has(e.toNode) ? entryId : e.toNode }));
   parent.nodes = [...parent.nodes.filter(n => !ids.has(n.id)), entry];

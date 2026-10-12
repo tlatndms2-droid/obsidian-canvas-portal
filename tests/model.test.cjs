@@ -87,3 +87,29 @@ test('renaming a referenced folder updates hidden file cards without renaming po
   assert.equal(p.graph.nodes.find(n=>n.id==='md').file,'이동/자료/노트.md');
   assert.equal(p.name,'내 포탈');
 });
+
+test('Group name comes from its label, including nested groups and unnamed fallback',()=>{
+  for(const label of ['기획 자료', '', undefined]){
+    const input={nodes:[{id:'g',type:'group',label,x:0,y:0,width:400,height:300}],edges:[]};
+    const made=M.createPortal(input,['g'],'이름을 덮어쓰면 안 됨'),p=made.root.canvasPortal.portals[made.portalId];
+    assert.equal(p.name,label||'새 포탈');
+    assert.equal(M.title(made.root.nodes[0].text),p.name);
+    assert.equal(M.title(p.graph.nodes[0].text),p.name);
+  }
+  const input={nodes:[{id:'g',type:'group',label:'내부 그룹',x:0,y:0,width:400,height:300}],edges:[]};
+  const parent=M.createSelect(input,['g'],'상위');
+  const child=M.createPortal(parent.root,['g'],'다른 이름',parent.portalId);
+  assert.equal(child.root.canvasPortal.portals[child.portalId].name,'내부 그룹');
+});
+
+test('Group entry does not retain large group dimensions; restore still encloses its contents',()=>{
+ const group={id:'g',type:'group',label:'기획',x:-20,y:-40,width:2000,height:1400};
+ const child={id:'n',type:'text',text:'자료',x:1000,y:700,width:240,height:140};
+ const made=M.createPortal({nodes:[group,child],edges:[]},['g']);
+ const entry=made.root.nodes[0],p=made.root.canvasPortal.portals[made.portalId];
+ assert.ok(entry.width<group.width&&entry.height<group.height);
+ assert.equal(entry.x,group.x);assert.equal(entry.y,group.y);
+ assert.deepEqual(p.originalEntry,group);assert.deepEqual(p.graph.nodes.find(n=>n.id==='n'),child);
+ const restored=M.restoreItems(made.root,made.portalId),g=restored.nodes.find(n=>n.id==='g');
+ assert.ok(g.x<=child.x&&g.y<=child.y&&g.x+g.width>=child.x+child.width&&g.y+g.height>=child.y+child.height);
+});

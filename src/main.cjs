@@ -413,6 +413,7 @@ module.exports = class CanvasPortal extends Plugin {
   askCreate(s) {
     if(s.preview)return;
     const selected=[...s.c.selection].map(n=>n.getData());
+    if(selected.length===1&&selected[0].type==='group'){this.create(s,selected[0].label);return;}
     if(selected.length===1&&selected[0].type==='file'&&selected[0].file.toLowerCase().endsWith('.canvas')){this.create(s,M.fileTitle(selected[0].file));return;}
     new PortalNameModal(this.app, name => this.create(s, name)).open();
   }
@@ -421,7 +422,15 @@ module.exports = class CanvasPortal extends Plugin {
     try {
       this.flushEditors(s);this.capture(s);
       const ids = [...s.c.selection].filter(n => s.c.nodes.has(n.id)).map(n => n.id);
-      const { root, entryId } = M.createPortal(s.root, ids, name,s.current); M.validate(root);
+      const { root, entryId, portalId } = M.createPortal(s.root, ids, name,s.current); M.validate(root);
+      if(root.canvasPortal.portals[portalId].type==='group'){
+        const probe=document.createElement('div');
+        probe.textContent=root.canvasPortal.portals[portalId].name;
+        probe.style.cssText='position:absolute;visibility:hidden;pointer-events:none;box-sizing:border-box;width:max-content;min-width:120px;max-width:360px;padding:16px 24px;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--font-text);font-size:var(--font-text-size,16px);line-height:var(--line-height-normal,1.5);';
+        s.c.wrapperEl.appendChild(probe);
+        try { const entry=M.space(root,s.current).nodes.find(n=>n.id===entryId);entry.width=Math.ceil(probe.offsetWidth);entry.height=Math.max(64,Math.ceil(probe.offsetHeight)); }
+        finally { probe.remove(); }
+      }
       await this.commitRoot(s,root,[entryId]);new Notice('포탈을 만들었습니다. Ctrl+Enter로 입장하세요.');
     } catch (e) { this.notifyError(e); } finally { s.busy = false; }
   }
