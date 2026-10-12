@@ -47,7 +47,6 @@ class PortalSettings extends PluginSettingTab {
     new Setting(this.containerEl).setName('플러그인 제거 준비').setDesc('최신 백업과 일반 Canvas 내보내기를 갱신·검증합니다. 플러그인을 삭제하지는 않습니다.').addButton(b=>b.setButtonText('제거 준비').onClick(async()=>{b.setDisabled(true);await this.plugin.runBackup(false,true);this.display();}));
     new Setting(this.containerEl).setName('단축키').setDesc('설정 → 단축키에서 Canvas Portal을 검색해 생성과 입장·퇴장 단축키를 변경할 수 있습니다.');
     new Setting(this.containerEl).setName('발광 색상').setDesc('포탈 카드 주변 발광 색상').addColorPicker(c => c.setValue(this.plugin.settings.glowColor).onChange(async value => { this.plugin.settings.glowColor = value; this.plugin.applyColor(); await this.plugin.saveData(this.plugin.settings); }));
-    new Setting(this.containerEl).setName('현재 내부 공간에서 나가기').addButton(b => b.setButtonText('상위 Canvas로 복귀').onClick(() => this.plugin.leaveActive()));
   }
 }
 
@@ -62,11 +61,9 @@ module.exports = class CanvasPortal extends Plugin {
       if (!checking && enabled) this.askCreate(s); return enabled;
     }});
     this.addCommand({ id: 'toggle-portal', name: '입장·퇴장', hotkeys: [{ modifiers: ['Ctrl'], key: 'Enter' }], checkCallback: checking => {
-      const s = this.active(), selected = s && this.selectedPortal(s); if (!selected) return false;
-      if (!checking) this.transition(s, selected); return true;
-    }});
-    this.addCommand({ id: 'leave-portal', name: '상위 Canvas로 복귀', checkCallback: checking => {
-      const s = this.active(); if (!s?.current&&!s?.linkBack) return false; if (!checking) this.leaveActive(); return true;
+      const s = this.active(), action = this.navigationAction(s); if (!action) return false;
+      if (s.c.wrapperEl.contains(document.activeElement) && document.activeElement.closest('textarea,input,[contenteditable="true"]')) return false;
+      if (!checking) this.navigate(s, action); return true;
     }});
     this.addCommand({id:'clone-portal',name:'포탈 복제',checkCallback:checking=>{const s=this.active(),r=s&&this.selectedPortal(s);if(r?.role!=='entry')return false;if(!checking)this.copyPortal(s,r.id);return true;}});
     this.addCommand({id:'unportal',name:'포탈 해제 · 현재 자료 꺼내기',checkCallback:checking=>{const s=this.active(),r=s&&this.selectedPortal(s);if(r?.role!=='entry')return false;if(!checking)this.beginUnportal(s,[r.id]);return true;}});
@@ -82,14 +79,14 @@ module.exports = class CanvasPortal extends Plugin {
       if (e.isComposing) return;
       const s = this.active(); if (!s || !s.c.wrapperEl.contains(e.target)) return;
       if(s.preview){if(e.key==='Escape'){e.preventDefault();e.stopImmediatePropagation();this.cancelPreview(s);}return;}
-      const selected = this.selectedPortal(s); if (!selected) return;
+      const action = this.navigationAction(s); if (!action) return;
       if (e.target.closest('textarea,input,[contenteditable="true"]')) return;
       const commandId = `${this.manifest.id}:toggle-portal`;
       const manager = this.app.hotkeyManager;
       const customized = manager?.getHotkeys(commandId);
       const hotkeys = customized === undefined ? [{ modifiers: ['Ctrl'], key: 'Enter' }] : customized;
       if (!hotkeys.some(h => this.matchesKey(e, h))) return;
-      e.preventDefault(); e.stopImmediatePropagation(); this.transition(s, selected);
+      e.preventDefault(); e.stopImmediatePropagation(); this.navigate(s, action);
     };
     window.addEventListener('keydown', this.keyHandler, true);
     this.register(() => window.removeEventListener('keydown', this.keyHandler, true));
@@ -156,6 +153,15 @@ module.exports = class CanvasPortal extends Plugin {
     const n = [...s.c.selection][0]; if (!n?.getData || !s.c.nodes.has(n.id)) return null;
     const r = M.ref(n.getData()); return r && this.portal(s,r.id) ? r : null;
   }
+  navigationAction(s) {
+    if(!s || s.busy || s.preview)return null;
+    const selected=this.selectedPortal(s);
+    if(selected)return {portal:selected};
+    // A mixed or multiple-portal selection is ambiguous; never treat it as no portal selected.
+    if([...s.c.selection].some(n=>s.c.nodes.has(n.id)&&n.getData&&M.ref(n.getData())))return null;
+    return s.current ? {back:'virtual'} : s.linkBack ? {back:'link'} : null;
+  }
+  navigate(s,action){if(action.portal)return this.transition(s,action.portal);return action.back==='virtual'?this.leave(s):this.leaveLink(s);}
   portal(s,id){return s.root.canvasPortal?.portals[id] || (s.linkBack?.id===id?s.linkBack.owner.root.canvasPortal.portals[id]:null);}
   addPortalMenu(s,menu){
     if(s.preview||s.c.readonly||menu.canvasPortalAdded)return;menu.canvasPortalAdded=true;
