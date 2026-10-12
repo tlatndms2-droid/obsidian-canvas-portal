@@ -364,7 +364,7 @@ module.exports = class CanvasPortal extends Plugin {
       if (!r || !p || !n.nodeEl) continue;
       n.nodeEl.classList.add('cp-portal', r.role === 'entry' ? 'cp-entry' : 'cp-exit');
       let marker = n.nodeEl.querySelector(':scope > .cp-marker');
-      if (!marker) { marker = document.createElement('div'); marker.className = 'cp-marker'; n.nodeEl.appendChild(marker); if (r.role === 'entry') { const icon = marker.createSpan({ cls: 'cp-enter-icon' }); setIcon(icon, p.type==='link'?'link':'log-in');icon.setAttribute('aria-label',p.type==='link'?'Link 포탈':'입장 포탈'); } marker.createSpan({ cls: 'cp-display-id', text: p.displayId }); }
+      if (!marker) { marker = document.createElement('div'); marker.className = 'cp-marker'; n.nodeEl.appendChild(marker); if (r.role === 'entry') { const icon = marker.createSpan({ cls: 'cp-enter-icon' }); setIcon(icon, p.type==='link'?'link':p.type==='group'?'group':'log-in');icon.setAttribute('aria-label',p.type==='link'?'Link 포탈':p.type==='group'?'Group 포탈':'입장 포탈'); } marker.createSpan({ cls: 'cp-display-id', text: p.displayId }); }
       const id = marker.querySelector('.cp-display-id'); if (id.textContent !== p.displayId) id.textContent = p.displayId;
       if(p.type==='link'){
         let filename=marker.querySelector('.cp-link-filename');
