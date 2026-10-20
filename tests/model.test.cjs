@@ -113,3 +113,9 @@ test('Group entry does not retain large group dimensions; restore still encloses
  const restored=M.restoreItems(made.root,made.portalId),g=restored.nodes.find(n=>n.id==='g');
  assert.ok(g.x<=child.x&&g.y<=child.y&&g.x+g.width>=child.x+child.width&&g.y+g.height>=child.y+child.height);
 });
+test('portal editor preserves spaces, blank text and trailing newlines through saved ID round trips', () => {
+  for (const text of ['', ' ', '첫 줄 ', '첫 줄\n', '첫 줄\n\n', '첫 줄\n둘째 줄 ', '  한글  ']) {
+    assert.equal(M.title(text), text);
+    assert.equal(M.title(M.cardText(text, 'P001')), text);
+  }
+});

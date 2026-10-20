@@ -2,8 +2,9 @@ const clone = value => JSON.parse(JSON.stringify(value));
 const uid = () => globalThis.crypto.randomUUID().replaceAll('-', '');
 const ref = node => node?.canvasPortalRef;
 const graph = data => ({ nodes: clone(data.nodes || []), edges: clone(data.edges || []) });
-const ID_MARKER = /\n*<small class="cp-persistent-id">[^<]*<\/small>\s*$/;
-const title = text => String(text || '').replace(ID_MARKER, '').trim() || '새 포탈';
+// Strip only our two separator newlines; preceding whitespace belongs to the editor.
+const ID_MARKER = /(?:\n{2})?<small class="cp-persistent-id">[^<]*<\/small>\s*$/;
+const title = text => String(text ?? '').replace(ID_MARKER, '');
 const cardText = (name, displayId) => `${name}\n\n<small class="cp-persistent-id">${displayId}</small>`;
 
 function rootData(data) {
@@ -44,7 +45,7 @@ function createPortal(data, selectedIds, name, parentId=null, requestedType=null
   const maxY = Math.max(...selected.map(n => n.y + n.height));
   const portalId = uid(), entryId = type==='select'?uid():direct[0].id, exitId = uid();
   const displayId = nextId(root);
-  const portalName = type==='link'?fileTitle(direct[0].file):title(type==='group'?direct[0].label:name);
+  const portalName = type==='link'?fileTitle(direct[0].file):(title(type==='group'?direct[0].label:name).trim() || '새 포탈');
   const entry = { id: entryId, type: 'text', x: (minX + maxX) / 2 - 140, y: (minY + maxY) / 2 - 80, width: 280, height: 160, text: cardText(portalName, displayId), canvasPortalRef: { id: portalId, role: 'entry' } };
   const exit = { id: exitId, type: 'text', x: minX - 320, y: minY - 190, width: 280, height: 160, text: cardText(portalName, displayId), canvasPortalRef: { id: portalId, role: 'exit' } };
   const originalEntry=type==='select'?null:clone(direct[0]);
