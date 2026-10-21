@@ -2,6 +2,20 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const box={module:{exports:{}},require:n=>n==='obsidian'?{Plugin:class{},PluginSettingTab:class{},Modal:class{}}:require(path.join(__dirname,'../src',n))};
 vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../src/main.cjs'),'utf8'),box);
 const p=Object.create(box.module.exports.prototype);
+test('cross-Canvas source save failure rolls destination back and unlocks both views',async()=>{
+ const plugin=Object.create(p),source={path:'source.canvas'},target={path:'target.canvas'},disk=new Map([[source.path,'source-before'],[target.path,'target-before']]),calls=[];
+ const make=(file,readonly=false)=>({path:file.path,v:{file,requestSave:{cancel(){}}},c:{readonly,setReadonly(value){this.readonly=value;}}});
+ const s=make(source),t=make(target,true);plugin.sessions=new Map([[1,s],[2,t]]);
+ plugin.changeFile=async(file,expected,next)=>{calls.push(file.path);assert.equal(disk.get(file.path),expected);if(file===source)throw Error('disk full');disk.set(file.path,next);};
+ await assert.rejects(()=>plugin.writeMoveFiles(s,'source-before','source-after',{file:target,before:'target-before',after:'target-after'}),/disk full/);
+ assert.equal(disk.get(target.path),'target-before');assert.equal(disk.get(source.path),'source-before');assert.deepEqual(calls,['target.canvas','source.canvas','target.canvas']);
+ assert.equal(s.c.readonly,false);assert.equal(t.c.readonly,true);assert.equal(s.lifecycleWriting,false);assert.equal(t.lifecycleWriting,false);
+});
+test('conditional Canvas update accepts formatting only and refuses concurrent content edits',async()=>{
+ const plugin=Object.create(p);let stored='{"edges":[],"nodes":[]}';plugin.app={vault:{process:async(file,fn)=>{stored=fn(stored);}}};
+ await plugin.changeFile({},'{"nodes":[], "edges":[]}','{"nodes":[1],"edges":[]}');assert.match(stored,/\[1\]/);
+ await assert.rejects(()=>plugin.changeFile({},'{"nodes":[], "edges":[]}','bad'),/변경/);assert.match(stored,/\[1\]/);
+});
 
 function unmountFixture() {
  const events=[];

@@ -1,6 +1,21 @@
 const { Plugin, PluginSettingTab, Setting, Modal, Notice, setIcon } = require('obsidian');
 const M = require("./model.cjs");
 const B = require("./backup.cjs");
+const historyGraph = data => ({...M.graph(data), ...(data.cpLifecycle?{cpLifecycle:data.cpLifecycle}:{})});
+const canonical = value => JSON.stringify(value,(_,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])):v);
+
+class PortalDeleteModal extends Modal {
+  constructor(plugin,s,ids,ordinary){super(plugin.app);Object.assign(this,{plugin,s,ids,ordinary});}
+  onOpen(){
+    this.titleEl.setText('포탈 삭제');
+    this.contentEl.createEl('p',{text:`선택한 포탈 ${this.ids.length}개를 어떻게 삭제할까요?`});
+    new Setting(this.contentEl).setName('내용을 꺼내고 포탈만 삭제').setDesc('내부 카드를 현재 화면의 빈 곳에 배치합니다. Link 포탈은 연결된 Canvas 파일 카드로 돌아갑니다.').addButton(b=>b.setButtonText('내용 꺼내기').onClick(()=>{this.close();this.plugin.beginUnportal(this.s,this.ids,this.ordinary);}));
+    new Setting(this.contentEl).setName('포탈과 내부까지 삭제').setDesc('내부 카드와 하위 포탈을 함께 삭제합니다. 원본 노트·이미지·연결된 Canvas 파일은 유지합니다.').addButton(b=>b.setButtonText('내부까지 삭제').setWarning().onClick(()=>{this.close();this.plugin.deleteContents(this.s,this.ids,this.ordinary);}));
+    if(this.ordinary.length)this.contentEl.createEl('p',{text:`함께 선택한 일반 카드 ${this.ordinary.length}개도 삭제됩니다.`});
+    new Setting(this.contentEl).addButton(b=>b.setButtonText('취소').onClick(()=>this.close()));
+  }
+  onClose(){this.s.deleteModal=null;this.contentEl.empty();}
+}
 
 class PortalNameModal extends Modal {
   constructor(app, done) { super(app); this.done = done; }
@@ -67,6 +82,7 @@ module.exports = class CanvasPortal extends Plugin {
     }});
     this.addCommand({id:'clone-portal',name:'포탈 복제',checkCallback:checking=>{const s=this.active(),r=s&&this.selectedPortal(s);if(r?.role!=='entry')return false;if(!checking)this.copyPortal(s,r.id);return true;}});
     this.addCommand({id:'unportal',name:'포탈 해제 · 현재 자료 꺼내기',checkCallback:checking=>{const s=this.active(),r=s&&this.selectedPortal(s);if(r?.role!=='entry')return false;if(!checking)this.beginUnportal(s,[r.id]);return true;}});
+    this.addCommand({id:'move-portals',name:'다른 포탈로 이동',checkCallback:checking=>{const s=this.active(),ids=s&&this.selectedEntries(s);if(!ids?.length)return false;if(!checking)this.beginMove(s,ids);return true;}});
     this.registerEvent(this.app.workspace.on('layout-change', () => this.discover()));
     this.registerEvent(this.app.workspace.on('active-leaf-change', () => this.discover()));
     this.registerEvent(this.app.vault.on('rename',(file,oldPath)=>{this.renameTask=(this.renameTask||Promise.resolve()).then(()=>this.renameLinks(oldPath,file.path)).catch(e=>this.notifyError(e));}));
@@ -153,6 +169,11 @@ module.exports = class CanvasPortal extends Plugin {
     const n = [...s.c.selection][0]; if (!n?.getData || !s.c.nodes.has(n.id)) return null;
     const r = M.ref(n.getData()); return r && this.portal(s,r.id) ? r : null;
   }
+  selectedEntries(s){
+    if(s.busy||s.preview||s.c.readonly||!s.c.selection.size)return [];
+    const nodes=[...s.c.selection];
+    return nodes.every(n=>s.c.nodes.has(n.id)&&M.ref(n.getData())?.role==='entry')?nodes.map(n=>M.ref(n.getData()).id):[];
+  }
   navigationAction(s) {
     if(!s || s.busy || s.preview)return null;
     const selected=this.selectedPortal(s);
@@ -178,6 +199,7 @@ module.exports = class CanvasPortal extends Plugin {
     if(s.preview||s.c.readonly||menu.canvasPortalAdded)return;menu.canvasPortalAdded=true;
     if([...s.c.selection].some(n=>s.c.nodes.has(n.id)&&M.ref(n.getData())?.role!=='exit'))menu.addItem(item=>item.setTitle('Create Portal').setSection('action').setIcon('log-in').onClick(()=>this.askCreate(s)));
     const r=this.selectedPortal(s);if(r?.role==='entry'){menu.addItem(item=>item.setTitle('포탈 복제').setIcon('copy').onClick(()=>this.copyPortal(s,r.id)));menu.addItem(item=>item.setTitle('포탈 해제 · 현재 자료 꺼내기').setIcon('log-out').onClick(()=>this.beginUnportal(s,[r.id])));}
+    const ids=this.selectedEntries(s);if(ids.length){menu.addItem(item=>item.setTitle('다른 포탈로 이동').setIcon('folder-input').onClick(()=>this.beginMove(s,ids)));menu.addItem(item=>item.setTitle('포탈 삭제…').setIcon('trash-2').onClick(()=>this.askDelete(s,ids)));}
   }
   currentData(s){return M.space(s.root,s.current);}
   async renameLinks(oldPath,newPath){
@@ -235,6 +257,7 @@ module.exports = class CanvasPortal extends Plugin {
       return JSON.stringify(s.root, null, '\t');
     });
     replace(v, 'setViewData', original => (text, clear) => {
+      if(s.lifecycleWriting)return;
       const parsed = JSON.parse(text);
       if (parsed.canvasPortal && parsed.canvasPortal.version !== 1) throw Error('지원하지 않는 포탈 데이터 버전');
       // A save from another tab reloads this view too. Keep its current portal
@@ -263,14 +286,14 @@ module.exports = class CanvasPortal extends Plugin {
       if (s.switching || s.rebuilding) { const result = original.call(c, n); s.nodesDirty = true; this.queue(s); return result; }
       const r = M.ref(n.getData());
       if (r?.role === 'exit') { new Notice('퇴장 포탈 카드는 삭제할 수 없습니다.'); return; }
-      if (r?.role === 'entry') { this.beginUnportal(s,[r.id],[],true); return; }
+      if (r?.role === 'entry') { this.askDelete(s,[r.id]); return; }
       const result = original.call(c, n); s.nodesDirty = true; this.queue(s); return result;
     });
     replace(c,'deleteSelection',original=>(...args)=>{
       const entries=[...c.selection].map(n=>n.getData?.()).filter(n=>M.ref(n)?.role==='entry');
       if(!entries.length)return original.apply(c,args);
       const ordinary=[...c.selection].map(n=>n.getData?.()).filter(n=>n&&!M.ref(n)).map(n=>n.id);
-      this.beginUnportal(s,entries.map(n=>M.ref(n).id),ordinary,true);
+      this.askDelete(s,entries.map(n=>M.ref(n).id),ordinary);
     });
     replace(c, 'getSelectionData', original => (...args) => {
       this.capture(s);
@@ -291,6 +314,18 @@ module.exports = class CanvasPortal extends Plugin {
       if(!data.canvasPortalTransfer)return original.call(c,data,offset);
       try{this.capture(s);const result=M.pasteTransfer(s.root,data,s.current,offset||{x:0,y:0});s.root.canvasPortal=result.root.canvasPortal;return {nodes:result.nodes,edges:result.edges};}
       catch(e){this.notifyError(e);return {nodes:[],edges:[]};}
+    });
+    replace(c,'pushHistory',original=>data=>{
+      const next={nodes:data.nodes,edges:data.edges,cpLifecycle:s.lifecycleRevision||0};
+      if(s.lifecycleDedup){const last=c.history.data[c.history.current];if(last&&(last.cpLifecycle||0)===next.cpLifecycle&&canonical(M.graph(last))===canonical(M.graph(next)))return;s.lifecycleDedup=false;}
+      return original.call(c,next);
+    });
+    replace(c,'overrideHistory',original=>(...args)=>{const result=original.apply(c,args),data=c.history.data[c.history.current];if(data)data.cpLifecycle=s.lifecycleRevision||0;return result;});
+    for(const [method,step]of [['undo',-1],['redo',1]])replace(c,method,original=>(...args)=>{
+      if(s.busy||s.preview||s.deleteModal)return;
+      const next=c.history.data[c.history.current+step];
+      if(next&&(next.cpLifecycle||0)!==(s.lifecycleRevision||0))return this.restoreLifecycle(s,next,c.history.current+step);
+      return original.apply(c,args);
     });
     replace(c, 'applyHistory', original => data => {
       if (s.current) {
@@ -372,7 +407,7 @@ module.exports = class CanvasPortal extends Plugin {
     try {
       // Keep the canonical portal registry below; do not clone and then discard
       // every hidden graph whenever the visible space is captured.
-      const d = M.clone({ ...s.c.getData(), canvasPortal: undefined });
+      const d = M.clone({ ...s.c.getData(), canvasPortal: undefined, cpLifecycle:undefined });
       if(!s.current&&s.linkBack){
         const p=this.portal(s,s.linkBack.id),exit=d.nodes.find(n=>n.id===p.exitId);
         if(exit&&JSON.stringify(exit)!==JSON.stringify(p.graph.nodes[0])){p.graph.nodes[0]={...exit,text:M.cardText(p.name,p.displayId)};s.linkBack.owner.v.requestSave();}
@@ -513,15 +548,15 @@ module.exports = class CanvasPortal extends Plugin {
       await this.commitRoot(s,root,[entryId]);new Notice('포탈을 만들었습니다. Ctrl+Enter로 입장하세요.');
     } catch (e) { this.notifyError(e); } finally { s.busy = false; }
   }
-  async commitRoot(s,root,selected=[]){
+  async commitRoot(s,root,selected=[],save=true){
     M.validate(root);this.rememberHistory(s);
     for(const [id,p] of Object.entries(s.root.canvasPortal?.portals||{}))if(!root.canvasPortal.portals[id])s.archives.set(id,M.clone(p));
-    s.root=root;this.show(s,this.displayData(s));s.c.pushHistory(M.graph(s.c.getData()));s.c.deselectAll();for(const id of selected){const n=s.c.nodes.get(id);if(n)s.c.select(n);}this.decorate(s);await s.v.save();
+    const revision=s.lifecycleRevision||0;s.root=root;this.show(s,this.displayData(s));s.lifecycleRevision=revision;s.c.pushHistory(M.graph(s.c.getData()));s.c.deselectAll();for(const id of selected){const n=s.c.nodes.get(id);if(n)s.c.select(n);}this.decorate(s);if(save)await s.v.save();
   }
   displayData(s){const data=M.clone(this.currentData(s));if(!s.current&&s.linkBack)data.nodes.push(M.clone(this.portal(s,s.linkBack.id).graph.nodes[0]));return data;}
   rememberHistory(s) {
     s.c.requestPushHistory?.run?.();
-    s.histories.set(s.current || 'main', { data: s.c.history.data.map(M.graph), current: s.c.history.current });
+    s.histories.set(s.current || 'main', { data: s.c.history.data.map(historyGraph), current: s.c.history.current });
   }
   show(s, data) {
     s.switching = true;
@@ -534,6 +569,7 @@ module.exports = class CanvasPortal extends Plugin {
       const history = s.histories.get(s.current || 'main');
       s.c.history.data = history?.data.length ? M.clone(history.data) : [M.graph(data)];
       s.c.history.current = history?.data.length ? history.current : 0;
+      s.lifecycleRevision=s.c.history.data[s.c.history.current]?.cpLifecycle||0;
       s.c.updateHistoryUI();
     }
     finally { s.switching = false; }
@@ -603,6 +639,99 @@ module.exports = class CanvasPortal extends Plugin {
     try{this.flushEditors(s);this.capture(s);const result=M.clonePortal(s.root,id,s.current);await this.commitRoot(s,result.root,[result.entryId]);new Notice('독립 포탈을 복제했습니다.');}
     catch(e){this.notifyError(e);}finally{s.busy=false;}
   }
+  askDelete(s,ids,ordinary=[]){
+    if(s.busy||s.preview||s.deleteModal||s.c.readonly)return;
+    s.deleteModal=new PortalDeleteModal(this,s,ids,ordinary);s.deleteModal.open();
+  }
+  async deleteContents(s,ids,ordinary){
+    if(s.busy||s.preview||s.c.readonly)return;s.busy=true;
+    try{this.flushEditors(s);this.capture(s);await this.commitRoot(s,M.deletePortals(s.root,ids,s.current,ordinary).root);new Notice('포탈과 내부 카드를 삭제했습니다. 원본 파일은 유지됩니다.');}
+    catch(e){this.notifyError(e);}finally{s.busy=false;}
+  }
+  beginMove(s,ids){
+    if(s.busy||s.preview||s.c.readonly)return;
+    this.flushEditors(s);this.capture(s);
+    const host=s.c.wrapperEl.createDiv({cls:'cp-placement-host cp-move-host'}),status=host.createDiv({cls:'cp-placement-status',text:'목적지 포탈을 클릭하세요 · Esc 취소'});
+    s.preview={kind:'move',host,status,ids};
+    host.addEventListener('pointerdown',async e=>{
+      e.preventDefault();e.stopImmediatePropagation();if(e.button!==0||s.busy)return;
+      const pos=s.c.posFromEvt(e),node=[...s.c.nodes.values()].reverse().find(n=>pos.x>=n.x&&pos.x<=n.x+n.width&&pos.y>=n.y&&pos.y<=n.y+n.height&&M.ref(n.getData())?.role==='entry');
+      if(!node){status.setText('목적지 포탈 카드를 클릭하세요 · Esc 취소');return;}
+      const id=M.ref(node.getData()).id;if(ids.includes(id)){status.setText('옮길 포탈 자신은 목적지가 될 수 없습니다 · Esc 취소');return;}
+      s.busy=true;
+      try{await this.moveSelection(s,ids,id);this.cancelPreview(s);new Notice('포탈을 옮겼습니다. 바깥 연결선은 제거했습니다.');}
+      catch(error){status.setText(error.message+' · Esc 취소');new Notice(error.message);}
+      finally{s.busy=false;}
+    });
+    s.c.wrapperEl.focus();
+  }
+  async changeFile(file,expected,next){
+    await this.app.vault.process(file,text=>{if(text!==expected&&canonical(JSON.parse(text))!==canonical(JSON.parse(expected)))throw Error('Canvas가 변경되었습니다. 다시 시도해 주세요.');return next;});
+  }
+  async moveSelection(s,ids,destinationId){
+    this.flushEditors(s);this.capture(s);M.selectedEntries(s.root,ids,s.current);
+    const destination=s.root.canvasPortal.portals[destinationId];
+    if(!destination||!this.currentData(s).nodes.some(n=>M.ref(n)?.id===destinationId))throw Error('목적지 포탈을 다시 선택하세요.');
+    let external=null,result;
+    if(destination.type==='link'){
+      if(destination.target===s.path)throw Error('현재 Canvas 자신을 가리키는 Link로는 옮길 수 없습니다.');
+      const file=this.app.vault.getAbstractFileByPath(destination.target);if(!file||file.extension!=='canvas')throw Error('연결된 Canvas를 찾을 수 없습니다.');
+      for(const id of ids)for(const child of M.descendants(s.root,id)){const p=s.root.canvasPortal.portals[child];if(p.type==='link'&&p.target===file.path)throw Error('목적지 Canvas를 가리키는 포탈은 그 Canvas 안으로 옮길 수 없습니다.');}
+      for(const other of this.sessions.values())if(other.path===file.path){if(other.busy||other.preview)throw Error('목적지 Canvas의 진행 중인 작업을 먼저 마쳐 주세요.');this.flushEditors(other);this.capture(other);await other.v.save();}
+      const text=await this.app.vault.read(file),target=M.rootData(JSON.parse(text));
+      result=M.movePortals(s.root,ids,s.current,null,target);
+      external={file,before:text,after:JSON.stringify(result.target,null,'\t')};
+    }else result=M.movePortals(s.root,ids,s.current,destinationId);
+    await this.commitMove(s,result.root,external);
+  }
+  async commitMove(s,root,external){
+    this.rememberHistory(s);await s.v.save();
+    const before=M.clone(s.root),beforeText=await this.app.vault.read(s.v.file),afterText=JSON.stringify(root,null,'\t');
+    const previous=s.lifecycleRevision||0,revision=(s.lifecycleSequence||0)+1;
+    await this.writeMoveFiles(s,beforeText,afterText,external);
+    s.lifecycleSequence=revision;s.lifecycleRevision=revision;
+    await this.commitRoot(s,root,[],false);this.capture(s);
+    s.lifecycleDedup=true;
+    // Native history stores visible cards only. Keep a snapshot only for a move boundary.
+    s.lifecycleRecords??=new Map();s.lifecycleRecords.set(revision,{previous,revision,parent:s.current,before,after:M.clone(s.root),external});
+    const retained=new Set(s.c.history.data.map(d=>d.cpLifecycle||0));
+    for(const [key,history]of s.histories)if(key!==(s.current||'main'))for(const d of history.data)retained.add(d.cpLifecycle||0);
+    for(const id of s.lifecycleRecords.keys())if(!retained.has(id))s.lifecycleRecords.delete(id);
+  }
+  async writeMoveFiles(s,beforeText,afterText,external){
+    const affected=[...this.sessions.values()].filter(other=>other.path===s.path||other.path===external?.file.path);
+    const locks=affected.map(other=>[other,other.c.readonly]);
+    for(const [other]of locks){other.c.setReadonly(true);other.v.requestSave?.cancel?.();other.lifecycleWriting=true;}
+    let targetWritten=false;
+    try{
+      if(external){await this.changeFile(external.file,external.before,external.after);targetWritten=true;}
+      await this.changeFile(s.v.file,beforeText,afterText);
+    }catch(error){
+      if(targetWritten)try{await this.changeFile(external.file,external.after,external.before);}catch(rollback){throw Error('원본은 유지했지만 목적지 복구에 실패했습니다. 양쪽 Canvas를 확인하세요: '+rollback.message);}
+      throw error;
+    }finally{for(const [other,readonly]of locks){other.lifecycleWriting=false;other.c.setReadonly(readonly);}}
+    for(const [other]of locks)if(other!==s){const text=other.path===s.path?afterText:external.after;await other.v.setViewData(text,false);}
+  }
+  async restoreLifecycle(s,data,index){
+    const current=s.lifecycleRevision||0,wanted=data.cpLifecycle||0;
+    const undo=s.lifecycleRecords?.get(current),redo=s.lifecycleRecords?.get(wanted);
+    const record=undo?.previous===wanted?undo:redo?.previous===current?redo:null;
+    if(!record||record.parent!==s.current){new Notice('다른 공간에서 변경된 이동 기록은 되돌릴 수 없습니다.');return;}
+    const backwards=record===undo,expected=backwards?record.after:record.before,next=M.clone(backwards?record.before:record.after);
+    s.busy=true;
+    try{
+      this.flushEditors(s);this.capture(s);
+      const hidden=root=>{const copy=M.clone(root),g=M.space(copy,s.current);g.nodes=[];g.edges=[];return canonical(copy);};
+      if(hidden(s.root)!==hidden(expected))throw Error('이동 후 내부 내용이 변경되었습니다. 내부 변경을 먼저 되돌려 주세요.');
+      const g=M.space(next,s.current);Object.assign(g,M.graph(data));M.validate(next);
+      await s.v.save();const beforeText=await this.app.vault.read(s.v.file);
+      let external=record.external;
+      if(external&&backwards)external={file:external.file,before:external.after,after:external.before};
+      await this.writeMoveFiles(s,beforeText,JSON.stringify(next,null,'\t'),external);
+      s.root=next;s.lifecycleRevision=wanted;s.c.history.current=index;
+      s.c.applyHistory(data);s.lifecycleDedup=true;this.decorate(s);
+    }catch(e){new Notice(e.message);}finally{s.busy=false;}
+  }
   async beginUnportal(s,ids,deleteIds=[],deleting=false){
     if(s.busy||s.preview)return;
     try{
@@ -611,7 +740,7 @@ module.exports = class CanvasPortal extends Plugin {
       if(!virtual.length){
         let root=M.clone(s.root);
         if(deleting){const parent=M.space(root,s.current),removed=new Set([...deleteIds,...links.map(id=>root.canvasPortal.portals[id].entryId)]);parent.nodes=parent.nodes.filter(n=>!removed.has(n.id));parent.edges=parent.edges.filter(e=>!removed.has(e.fromNode)&&!removed.has(e.toNode));links.forEach(id=>delete root.canvasPortal.portals[id]);}
-        else root=M.unportal(root,links,s.current).root;
+        else root=M.unportal(root,links,s.current,{x:0,y:0},deleteIds).root;
         await this.commitRoot(s,root);return;
       }
       const items=virtual.flatMap(id=>M.restoreItems(s.root,id).nodes),bounds=M.bounds(items),ignored=new Set([...deleteIds,...ids.map(id=>s.root.canvasPortal.portals[id].entryId)]);
@@ -633,7 +762,7 @@ module.exports = class CanvasPortal extends Plugin {
     }catch(e){this.notifyError(e);}
   }
   updatePreview(s,pos){
-    const p=s.preview;if(!p)return;p.offset={x:pos.x-p.bounds.x,y:pos.y-p.bounds.y};
+    const p=s.preview;if(!p||p.kind==='move')return;p.offset={x:pos.x-p.bounds.x,y:pos.y-p.bounds.y};
     const nodes=p.items.map(n=>({...n,x:n.x+p.offset.x,y:n.y+p.offset.y})),obstacles=[...s.c.nodes.values()].map(n=>n.getData()).filter(n=>!p.ignored.has(n.id));
     p.valid=!nodes.some(n=>obstacles.some(o=>M.overlaps(n,o)));
     p.host.toggleClass('is-blocked',!p.valid);p.status.textContent=p.valid?'빈 곳을 클릭해 배치 · Esc 취소':'기존 카드와 겹칩니다 · 다른 위치로 이동 · Esc 취소';
@@ -642,6 +771,7 @@ module.exports = class CanvasPortal extends Plugin {
   }
   cancelPreview(s){if(!s.preview)return;s.preview.host.remove();s.preview=null;s.c.wrapperEl.focus();}
   detach(s) {
+    s.deleteModal?.close();
     this.cancelPreview(s);
     if (s.frame != null) cancelAnimationFrame(s.frame);
     s.observer?.disconnect(); window.removeEventListener('dblclick', s.doubleWindow, true);

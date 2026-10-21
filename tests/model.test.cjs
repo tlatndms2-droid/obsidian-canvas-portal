@@ -6,6 +6,41 @@ const data = () => ({ nodes: [
   { id:'b', type:'text', text:'B', x:300,y:120,width:200,height:100 },
   { id:'out', type:'file', file:'원본.md', x:800,y:0,width:200,height:100 }
 ], edges:[{id:'inside',fromNode:'a',toNode:'b'},{id:'external',fromNode:'out',toNode:'a'}] });
+test('delete removes nested records and incident edges while keeping unrelated file references',()=>{
+  const child=M.createSelect(data(),['a','b'],'child'),outer=M.createSelect(child.root,[child.entryId],'outer');
+  const before=JSON.stringify(outer.root),result=M.deletePortals(outer.root,[outer.portalId]);
+  assert.deepEqual(result.root.nodes.map(n=>n.file),['원본.md']);assert.equal(result.root.edges.length,0);
+  assert.equal(Object.keys(result.root.canvasPortal.portals).length,0);assert.equal(JSON.stringify(outer.root),before);
+});
+test('move retains subtree and internal lines but drops every line outside selected portals',()=>{
+  const a=M.createSelect(data(),['a','b'],'A'),b=M.createSelect(a.root,['out'],'B');
+  const internal=M.clone(b.root.canvasPortal.portals[a.portalId].graph);
+  const moved=M.movePortals(b.root,[a.portalId],null,b.portalId);
+  assert.equal(moved.root.nodes.length,1);assert.equal(moved.root.edges.length,0);
+  assert.deepEqual(moved.root.canvasPortal.portals[a.portalId].graph,internal);
+  assert.equal(moved.root.canvasPortal.portals[a.portalId].parentId,b.portalId);
+  const dest=moved.root.canvasPortal.portals[b.portalId].graph,entry=dest.nodes.find(n=>n.id===a.entryId);
+  assert.ok(dest.nodes.filter(n=>n!==entry).every(n=>!M.overlaps(n,entry)));
+  assert.throws(()=>M.movePortals(b.root,[a.portalId],null,a.portalId),/자기 자신/);
+  assert.throws(()=>M.movePortals(moved.root,[b.portalId],null,a.portalId),/하위 포탈/);
+});
+test('cross-file multi move remaps colliding IDs, preserves nested file cards, and removes source entries',()=>{
+  const a=M.createSelect(data(),['a','b'],'A'),b=M.createSelect(a.root,['out'],'B');
+  const target=M.clone(b.root),moved=M.movePortals(b.root,[a.portalId,b.portalId],null,null,target);
+  assert.equal(moved.root.nodes.length,0);assert.equal(Object.keys(moved.root.canvasPortal.portals).length,0);
+  assert.equal(moved.target.nodes.length,4);assert.equal(Object.keys(moved.target.canvasPortal.portals).length,4);
+  for(const n of moved.nodes)assert.ok(!target.nodes.some(old=>old.id===n.id));
+  assert.equal(Object.values(moved.target.canvasPortal.portals).filter(p=>p.graph.nodes.some(n=>n.file==='원본.md')).length,2);
+  assert.deepEqual(target,b.root);M.validate(moved.target);
+});
+test('deleting a Link never follows or edits the referenced Canvas, and exit IDs cannot be ordinary deletions',()=>{
+  const input=data();input.nodes.push({id:'link',type:'file',file:'linked.canvas',x:1400,y:0,width:200,height:100});
+  const link=M.createPortal(input,['link'],'link'),p=link.root.canvasPortal.portals[link.portalId];
+  const deleted=M.deletePortals(link.root,[p.id],null,['a']);
+  assert.deepEqual(deleted.root.nodes.map(n=>n.id),['b','out']);assert.equal(deleted.root.edges.length,0);
+  assert.equal(input.nodes.find(n=>n.id==='link').file,'linked.canvas');
+  assert.throws(()=>M.deletePortals(link.root,[p.id],p.id),/위치/);
+});
 test('select moves nodes, preserves relative layout and rewires only external edges',()=>{
   const input=data(), initial=JSON.stringify(input); const {root,portalId,entryId}=M.createSelect(input,['a','b'],'자료');
   const p=root.canvasPortal.portals[portalId]; M.validate(root);

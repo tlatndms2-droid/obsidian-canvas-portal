@@ -146,4 +146,42 @@ function syncLinkNames(root,oldPath=null,newPath=null){
   }
   return changed;
 }
-module.exports = { clone, uid, ref, graph, title, cardText, fileTitle, syncLinkNames, rootData, createSelect, createPortal, space, bounds, overlaps, clonePortal, descendants, restoreItems, unportal, pasteTransfer, validate };
+function selectedEntries(root, ids, parentId) {
+  const parent=space(root,parentId),unique=[...new Set(ids)];
+  if(!parent||!unique.length)throw Error('이동하거나 삭제할 포탈을 선택하세요.');
+  return unique.map(id=>{const p=root.canvasPortal.portals[id],n=parent.nodes.find(n=>ref(n)?.role==='entry'&&ref(n).id===id);
+    if(!p||!n||p.parentId!==parentId)throw Error('선택한 포탈의 위치가 변경되었습니다. 다시 선택하세요.');return n;});
+}
+function deletePortals(data,ids,parentId=null,ordinary=[]) {
+  const root=rootData(data),entries=selectedEntries(root,ids,parentId),parent=space(root,parentId);
+  const removed=new Set([...entries.map(n=>n.id),...ordinary.filter(id=>parent.nodes.some(n=>n.id===id&&!ref(n)))]);
+  const records=new Set();for(const id of ids)for(const child of descendants(root,id))records.add(child);
+  parent.nodes=parent.nodes.filter(n=>!removed.has(n.id));parent.edges=parent.edges.filter(e=>!removed.has(e.fromNode)&&!removed.has(e.toNode));
+  for(const id of records)delete root.canvasPortal.portals[id];validate(root);return {root};
+}
+// Passing a destination document explicitly means a transfer between Canvas files.
+function movePortals(data,ids,parentId=null,destinationId=null,destinationData=null) {
+  const source=rootData(data),entries=selectedEntries(source,ids,parentId),target=destinationData?rootData(destinationData):source;
+  const moving=new Set();for(const id of ids)for(const child of descendants(source,id))moving.add(child);
+  if(!destinationData&&(moving.has(destinationId)||destinationId===parentId))throw Error('자기 자신이나 하위 포탈로는 옮길 수 없습니다.');
+  const destination=space(target,destinationId);
+  if(!destination||target.canvasPortal.portals[destinationId]?.type==='link')throw Error('올바른 목적지 공간이 아닙니다.');
+  let nodes=clone(entries),edges=[];
+  // Every line outside a moved portal is removed, including lines between selected entries.
+  if(destinationData){
+    const portals=Object.fromEntries([...moving].map(id=>[id,source.canvasPortal.portals[id]]));
+    const copied=pasteTransfer(target,{nodes,edges:[],canvasPortalTransfer:{version:1,portals}},destinationId);
+    Object.assign(target,copied.root);nodes=copied.nodes;
+  }else{
+    for(const id of ids)source.canvasPortal.portals[id].parentId=destinationId;
+    destination.nodes.push(...nodes);
+  }
+  const dest=space(target,destinationId),entryIds=new Set(nodes.map(n=>n.id)),obstacles=dest.nodes.filter(n=>!entryIds.has(n.id));
+  const b=bounds(nodes),o=bounds(obstacles),dx=obstacles.length?o.x+o.width+80-b.x:0,dy=obstacles.length?o.y-b.y:0;
+  for(const n of nodes){n.x+=dx;n.y+=dy;}
+  const sourceIds=new Set(entries.map(n=>n.id)),parent=space(source,parentId);
+  parent.nodes=parent.nodes.filter(n=>!sourceIds.has(n.id));parent.edges=parent.edges.filter(e=>!sourceIds.has(e.fromNode)&&!sourceIds.has(e.toNode));
+  if(destinationData)for(const id of moving)delete source.canvasPortal.portals[id];
+  validate(source);validate(target);return {root:source,target,nodes,edges};
+}
+module.exports = { clone, uid, ref, graph, title, cardText, fileTitle, syncLinkNames, rootData, createSelect, createPortal, space, bounds, overlaps, clonePortal, descendants, restoreItems, unportal, pasteTransfer, validate, deletePortals, movePortals, selectedEntries };
