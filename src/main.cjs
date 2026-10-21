@@ -312,6 +312,7 @@ module.exports = class CanvasPortal extends Plugin {
       finally { s.rebuilding = rebuilding; s.nodesDirty = true; this.queue(s); }
     });
     replace(c,'clear',original=>(...args)=>{const rebuilding=s.rebuilding,switching=s.switching;s.rebuilding=true;s.switching=true;try{return original.apply(c,args);}finally{s.rebuilding=rebuilding;s.switching=switching;s.nodesDirty=true;this.queue(s);}});
+    replace(c, 'virtualize', original => (...args) => this.batchViewportUnmount(s, original, args));
     replace(c, 'handlePaste', original => (...args) => {
       const result = original.apply(c, args); this.queue(s); return result;
     });
@@ -331,6 +332,39 @@ module.exports = class CanvasPortal extends Plugin {
     s.observer.observe(c.canvasEl, { childList: true });
     c.wrapperEl.style.setProperty('--cp-glow', this.settings.glowColor);
     this.queue(s);
+  }
+  batchViewportUnmount(s, original, args) {
+    const c = s.c;
+    if (s.batchingUnmount || c.zoom > c.zoomBreakpoint || typeof c.getIntersectingNodes !== 'function' || typeof c.getViewportBBox !== 'function') return original.apply(c, args);
+    const restores = [], writes = [];
+    s.batchingUnmount = true;
+    try {
+      // Native unmount reads scroll positions, then detaches each card's body.
+      // Keep those native reads and state changes, but apply the DOM writes
+      // together so the next card does not force another style/layout pass.
+      for (const n of c.getIntersectingNodes(c.getViewportBBox())) {
+        if (n.getData?.().type !== 'text' || !n.initialized || !n.isContentMounted || n.alwaysKeepLoaded || n.isEditing || Object.hasOwn(n, 'unmountContent') || typeof n.unmountContent !== 'function') continue;
+        if (!n.contentEl || !n.contentBlockerEl || !n.containerEl || typeof n.contentEl.detach !== 'function' || typeof n.contentBlockerEl.detach !== 'function') continue;
+        const unmount = n.unmountContent;
+        n.unmountContent = function (...values) {
+          const undo = [];
+          try {
+            for (const [el, key] of [[this.contentEl, 'detach'], [this.contentBlockerEl, 'detach'], [this.containerEl, 'appendChild']]) {
+              const own = Object.hasOwn(el, key), method = el[key];
+              el[key] = function (...inputs) { writes.push(() => method.apply(this, inputs)); return key === 'appendChild' ? inputs[0] : undefined; };
+              undo.push(() => { if (own) el[key] = method; else delete el[key]; });
+            }
+            return unmount.apply(this, values);
+          } finally { undo.reverse().forEach(restore => restore()); }
+        };
+        restores.push(() => { delete n.unmountContent; });
+      }
+      return original.apply(c, args);
+    } finally {
+      restores.reverse().forEach(restore => restore());
+      try { for (const write of writes) write(); }
+      finally { s.batchingUnmount = false; }
+    }
   }
   capture(s) {
     if (s.capturing || s.switching) return;

@@ -1,3 +1,8 @@
+.canvas-wrapper .canvas-node:not(.is-focused):not(.is-selected) .canvas-node-content.markdown-embed > .markdown-embed-content > .markdown-preview-view {
+  /* Obsidian's ancestor .is-focused also matches the active app body. Keep
+     unselected previews from becoming separate compositing layers on focus. */
+  transform: none;
+}
 .canvas-node.cp-portal {
   border-radius: var(--radius-m, 8px);
   box-shadow: 0 0 10px 3px color-mix(in srgb, var(--cp-glow, #9966ee) 42%, transparent), 0 0 25px 5px color-mix(in srgb, var(--cp-glow, #9966ee) 16%, transparent);

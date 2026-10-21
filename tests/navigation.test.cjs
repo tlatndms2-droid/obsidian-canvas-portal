@@ -2,6 +2,34 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const box={module:{exports:{}},require:n=>n==='obsidian'?{Plugin:class{},PluginSettingTab:class{},Modal:class{}}:require(path.join(__dirname,'../src',n))};
 vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../src/main.cjs'),'utf8'),box);
 const p=Object.create(box.module.exports.prototype);
+
+function unmountFixture() {
+ const events=[];
+ const element=label=>Object.create({detach(){events.push('write '+label);},appendChild(child){events.push('write '+label);return child;}});
+ const make=id=>Object.assign(Object.create({unmountContent(){events.push('read '+this.id);this.contentEl.detach();this.contentBlockerEl.detach();this.containerEl.appendChild(this.placeholderEl);this.isContentMounted=false;}}),{id,initialized:true,isContentMounted:true,getData:()=>({type:'text'}),contentEl:element(id+' body'),contentBlockerEl:element(id+' blocker'),containerEl:element(id+' container'),placeholderEl:{}});
+ const nodes=[make('a'),make('b')],c={zoom:-2,zoomBreakpoint:-1.7,getViewportBBox:()=>({}),getIntersectingNodes:()=>nodes};
+ return {events,nodes,s:{c}};
+}
+test('zoom unmount preserves native reads and state while batching DOM writes',()=>{
+ const {events,nodes,s}=unmountFixture();
+ const value=p.batchViewportUnmount(s,function(arg){assert.equal(this,s.c);for(const n of nodes)n.unmountContent();assert.equal(events.join(','),'read a,read b');return arg;},[42]);
+ assert.equal(value,42);assert.deepEqual(events,['read a','read b','write a body','write a blocker','write a container','write b body','write b blocker','write b container']);
+ for(const n of nodes){assert.equal(n.isContentMounted,false);assert.equal(Object.hasOwn(n,'unmountContent'),false);assert.equal(Object.hasOwn(n.contentEl,'detach'),false);}
+ assert.equal(s.batchingUnmount,false);
+});
+test('zoom batching restores methods and flushes completed native work when virtualization throws',()=>{
+ const {events,nodes,s}=unmountFixture();
+ assert.throws(()=>p.batchViewportUnmount(s,function(){nodes[0].unmountContent();throw Error('native failure');},[]),/native failure/);
+ assert.deepEqual(events,['read a','write a body','write a blocker','write a container']);
+ assert.equal(s.batchingUnmount,false);for(const n of nodes)assert.equal(Object.hasOwn(n,'unmountContent'),false);
+});
+test('zoom batching leaves editing cards, file cards and existing custom unmount hooks alone',()=>{
+ const {nodes,s}=unmountFixture();nodes[0].isEditing=true;nodes[1].getData=()=>({type:'file'});
+ p.batchViewportUnmount(s,()=>{for(const n of nodes)assert.equal(Object.hasOwn(n,'unmountContent'),false);},[]);
+ nodes[0].isEditing=false;const custom=()=>{};nodes[0].unmountContent=custom;
+ p.batchViewportUnmount(s,()=>assert.equal(nodes[0].unmountContent,custom),[]);
+ s.c.zoom=0;s.c.getIntersectingNodes=()=>{throw Error('unnecessary scan');};assert.equal(p.batchViewportUnmount(s,()=>7,[]),7);
+});
 test('capture copies visible data without serializing the hidden registry',()=>{
  let serialized=0;
  const meta={version:1,canvasId:'c',portals:{hidden:{id:'hidden',parentId:null,graph:{nodes:[],edges:[]}}},toJSON(){serialized++;return {};}};
