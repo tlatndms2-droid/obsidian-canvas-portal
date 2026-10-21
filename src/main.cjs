@@ -218,7 +218,7 @@ module.exports = class CanvasPortal extends Plugin {
       const loaded = JSON.parse(loadedText);
       if (loaded.canvasPortal) root.canvasPortal = M.clone(loaded.canvasPortal);
     }
-    const s = { v, c, path: v.file.path, root, current: null, stack:[], archives:new Map(), menuUndos:new Map(), busy: false, switching: false, histories: new Map(), nodeUndos: new Map(), undo: [], frame: null };
+    const s = { v, c, path: v.file.path, root, current: null, stack:[], archives:new Map(), menuUndos:new Map(), busy: false, switching: false, histories: new Map(), nodeUndos: new Map(), portalNodes: new Set(), nodesDirty: true, undo: [], frame: null };
     this.sessions.set(v, s);
     const replace = (object, key, factory) => {
       const had = Object.hasOwn(object, key), original = object[key]; if (typeof original !== 'function') return;
@@ -256,12 +256,15 @@ module.exports = class CanvasPortal extends Plugin {
       }
       finally { s.switching = switching; this.queue(s); }
     });
+    replace(c, 'addNode', original => n => {
+      const result = original.call(c, n); s.nodesDirty = true; this.queue(s); return result;
+    });
     replace(c, 'removeNode', original => n => {
-      if (s.switching || s.rebuilding) return original.call(c, n);
+      if (s.switching || s.rebuilding) { const result = original.call(c, n); s.nodesDirty = true; this.queue(s); return result; }
       const r = M.ref(n.getData());
       if (r?.role === 'exit') { new Notice('퇴장 포탈 카드는 삭제할 수 없습니다.'); return; }
       if (r?.role === 'entry') { this.beginUnportal(s,[r.id],[],true); return; }
-      return original.call(c, n);
+      const result = original.call(c, n); s.nodesDirty = true; this.queue(s); return result;
     });
     replace(c,'deleteSelection',original=>(...args)=>{
       const entries=[...c.selection].map(n=>n.getData?.()).filter(n=>M.ref(n)?.role==='entry');
@@ -306,9 +309,9 @@ module.exports = class CanvasPortal extends Plugin {
         for(const data of args[0]?.nodes||[]){const old=c.nodes.get(data.id);if(old&&old.getData().type!==data.type)c.removeNode(old);}
         return original.apply(c, args);
       }
-      finally { s.rebuilding = rebuilding; this.queue(s); }
+      finally { s.rebuilding = rebuilding; s.nodesDirty = true; this.queue(s); }
     });
-    replace(c,'clear',original=>(...args)=>{const rebuilding=s.rebuilding,switching=s.switching;s.rebuilding=true;s.switching=true;try{return original.apply(c,args);}finally{s.rebuilding=rebuilding;s.switching=switching;}});
+    replace(c,'clear',original=>(...args)=>{const rebuilding=s.rebuilding,switching=s.switching;s.rebuilding=true;s.switching=true;try{return original.apply(c,args);}finally{s.rebuilding=rebuilding;s.switching=switching;s.nodesDirty=true;this.queue(s);}});
     replace(c, 'handlePaste', original => (...args) => {
       const result = original.apply(c, args); this.queue(s); return result;
     });
@@ -323,7 +326,9 @@ module.exports = class CanvasPortal extends Plugin {
     s.doubleWindow = e => { if (c.wrapperEl.contains(e.target)) s.double(e); };
     window.addEventListener('dblclick', s.doubleWindow, true);
     s.observer = new MutationObserver(() => this.queue(s));
-    s.observer.observe(c.wrapperEl, { childList: true, subtree: true });
+    // Portal child replacement is handled by its render hook. Ordinary Markdown
+    // and toolbar mutations do not require revisiting every card in the Canvas.
+    s.observer.observe(c.canvasEl, { childList: true });
     c.wrapperEl.style.setProperty('--cp-glow', this.settings.glowColor);
     this.queue(s);
   }
@@ -331,7 +336,9 @@ module.exports = class CanvasPortal extends Plugin {
     if (s.capturing || s.switching) return;
     s.capturing = true;
     try {
-      const d = M.clone(s.c.getData());
+      // Keep the canonical portal registry below; do not clone and then discard
+      // every hidden graph whenever the visible space is captured.
+      const d = M.clone({ ...s.c.getData(), canvasPortal: undefined });
       if(!s.current&&s.linkBack){
         const p=this.portal(s,s.linkBack.id),exit=d.nodes.find(n=>n.id===p.exitId);
         if(exit&&JSON.stringify(exit)!==JSON.stringify(p.graph.nodes[0])){p.graph.nodes[0]={...exit,text:M.cardText(p.name,p.displayId)};s.linkBack.owner.v.requestSave();}
@@ -342,7 +349,7 @@ module.exports = class CanvasPortal extends Plugin {
         const exit = d.nodes.find(n => n.id === p.exitId);
         if (!exit) throw Error('퇴장 포탈을 찾을 수 없어 저장을 중단했습니다.');
         exit.text = M.cardText(p.name, p.displayId);
-        p.graph = M.graph(d);
+        p.graph = { nodes: d.nodes || [], edges: d.edges || [] };
       } else {
         const metadata = s.root.canvasPortal;
         s.root = d;
@@ -372,11 +379,31 @@ module.exports = class CanvasPortal extends Plugin {
     if (s.frame != null) return;
     s.frame = requestAnimationFrame(() => { s.frame = null; if (this.sessions.has(s.v)) this.decorate(s); });
   }
+  bindNodeMenu(s, n) {
+    if (s.menuUndos.has(n) || typeof n.showMenu !== 'function') return;
+    // Separate closure scope: a menu must not retain a replaced portal record
+    // through the decoration loop's shared lexical context.
+    const had = Object.hasOwn(n, 'showMenu'), original = n.showMenu;
+    n.showMenu = menu => { original.call(n, menu); this.addPortalMenu(s, menu); };
+    s.menuUndos.set(n, () => { if (had) n.showMenu = original; else delete n.showMenu; });
+  }
   decorate(s) {
-    for(const [n,restore] of s.menuUndos)if(s.c.nodes.get(n.id)!==n){restore();s.menuUndos.delete(n);}
-    for (const [old, restore] of s.nodeUndos) if (!s.c.nodes.has(old.id) || s.c.nodes.get(old.id) !== old) { restore(); s.nodeUndos.delete(old); }
-    for (const n of s.c.nodes.values()) {
-      if(!s.menuUndos.has(n)&&typeof n.showMenu==='function'){const had=Object.hasOwn(n,'showMenu'),original=n.showMenu;n.showMenu=menu=>{original.call(n,menu);this.addPortalMenu(s,menu);};s.menuUndos.set(n,()=>{if(had)n.showMenu=original;else delete n.showMenu;});}
+    if (s.nodesDirty) {
+      for(const [n,restore] of s.menuUndos)if(s.c.nodes.get(n.id)!==n){restore();s.menuUndos.delete(n);}
+      s.portalNodes.clear();
+      for (const n of s.c.nodes.values()) {
+        this.bindNodeMenu(s, n);
+        if (M.ref(n.getData())) s.portalNodes.add(n);
+      }
+      s.nodesDirty = false;
+    }
+    for (const [old, restore] of s.nodeUndos) {
+      const r = M.ref(old.getData());
+      if (s.c.nodes.get(old.id) !== old || !r || restore.record !== this.portal(s, r.id) || restore.role !== r.role) {
+        restore(); s.nodeUndos.delete(old);
+      }
+    }
+    for (const n of s.portalNodes) {
       const r = M.ref(n.getData()), p = r && this.portal(s,r.id);
       if (!r || !p || !n.nodeEl) continue;
       n.nodeEl.classList.add('cp-portal', r.role === 'entry' ? 'cp-entry' : 'cp-exit');
@@ -423,6 +450,7 @@ module.exports = class CanvasPortal extends Plugin {
         }
         patch('convertToFile', _original => () => { new Notice('포탈 카드는 Markdown 파일로 변환할 수 없습니다.'); });
         const restore = () => { restorers.reverse().forEach(fn => fn()); n.nodeEl?.classList.remove('cp-portal', 'cp-entry', 'cp-exit'); marker.remove(); };
+        restore.record = p; restore.role = r.role;
         s.nodeUndos.set(n, restore);
       }
     }
@@ -593,6 +621,7 @@ module.exports = class CanvasPortal extends Plugin {
     } catch (e) { this.notifyError(e); }
     s.nodeUndos.forEach(fn => fn()); s.nodeUndos.clear();
     s.menuUndos.forEach(fn=>fn());s.menuUndos.clear();
+    s.portalNodes.clear();
     s.undo.reverse().forEach(fn => fn()); s.c.wrapperEl.style.removeProperty('--cp-glow');
     if (s.frame != null) cancelAnimationFrame(s.frame);
   }

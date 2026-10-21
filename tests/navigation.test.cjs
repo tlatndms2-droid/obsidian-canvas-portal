@@ -2,6 +2,29 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const box={module:{exports:{}},require:n=>n==='obsidian'?{Plugin:class{},PluginSettingTab:class{},Modal:class{}}:require(path.join(__dirname,'../src',n))};
 vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../src/main.cjs'),'utf8'),box);
 const p=Object.create(box.module.exports.prototype);
+test('capture copies visible data without serializing the hidden registry',()=>{
+ let serialized=0;
+ const meta={version:1,canvasId:'c',portals:{hidden:{id:'hidden',parentId:null,graph:{nodes:[],edges:[]}}},toJSON(){serialized++;return {};}};
+ const data={nodes:[{id:'entry',type:'text',text:'Name',canvasPortalRef:{id:'hidden',role:'entry'}}],edges:[],canvasPortal:meta};
+ meta.portals.hidden.name='Name';meta.portals.hidden.displayId='P-01';
+ const s={c:{getData:()=>data},root:{...data},archives:new Map(),current:null};
+ p.capture(s);
+ assert.equal(serialized,0);assert.equal(s.root.canvasPortal,meta);
+ assert.notEqual(s.root.nodes,data.nodes);assert.notEqual(s.root.nodes[0],data.nodes[0]);
+});
+test('steady decoration does not inspect ordinary cards again; additions are bound when dirty',()=>{
+ let reads=0;const n={id:'n',getData:()=>{reads++;return {id:'n',type:'text'};},showMenu(){}};
+ const s={c:{nodes:new Map([['n',n]])},nodesDirty:true,portalNodes:new Set(),menuUndos:new Map(),nodeUndos:new Map()};
+ p.decorate(s);assert.equal(reads,1);assert.equal(s.menuUndos.size,1);
+ p.decorate(s);p.decorate(s);assert.equal(reads,1);
+ s.c.nodes.clear();s.nodesDirty=true;p.decorate(s);assert.equal(s.menuUndos.size,0);assert.equal(s.portalNodes.size,0);
+});
+test('replaced portal records release stale bindings even when native node identity is unchanged',()=>{
+ let restored=0;const old={},current={},n={id:'n',getData:()=>({canvasPortalRef:{id:'p',role:'entry'}})};
+ const restore=()=>restored++;restore.record=old;restore.role='entry';
+ const s={c:{nodes:new Map([['n',n]])},root:{canvasPortal:{portals:{p:current}}},nodesDirty:false,portalNodes:new Set(),menuUndos:new Map(),nodeUndos:new Map([[n,restore]])};
+ p.decorate(s);assert.equal(restored,1);assert.equal(s.nodeUndos.size,0);
+});
 const node=(id,role)=>({id,getData:()=>({canvasPortalRef:role?{id:'p',role}:undefined})});
 const ordinary=node('ordinary'),entry=node('entry','entry'),exit=node('exit','exit');
 const session=(selected=[],extra={})=>({c:{selection:new Set(selected),nodes:new Map([ordinary,entry,exit].map(n=>[n.id,n]))},root:{canvasPortal:{portals:{p:{}}}},current:null,...extra});
