@@ -1,6 +1,7 @@
 const { Plugin, PluginSettingTab, Setting, Modal, Notice, setIcon } = require('obsidian');
 const M = require("./model.cjs");
 const B = require("./backup.cjs");
+const S = require("./safety.cjs");
 const historyGraph = data => ({...M.graph(data), ...(data.cpLifecycle?{cpLifecycle:data.cpLifecycle}:{})});
 const canonical = value => JSON.stringify(value,(_,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])):v);
 
@@ -70,6 +71,9 @@ module.exports = class CanvasPortal extends Plugin {
     this.settings = { glowColor: '#9966ee', backupFolder:'',autoMinutes:0, ...(await this.loadData()) };
     this.sessions = new Map();
     this.errors = [];
+    const local=require('node:path').join(process.env.LOCALAPPDATA||require('node:os').homedir(),'CanvasPortalSafety',S.hash(this.app.vault.adapter.basePath));
+    this.safety=S.install(this.app.vault.adapter,local,e=>this.notifyError(e));
+    this.register(()=>this.safety.dispose());
     this.addSettingTab(new PortalSettings(this.app, this));
     this.addCommand({ id: 'create-select-portal', name: 'Create Portal · 선택 자료 묶기', checkCallback: checking => {
       const s = this.active(); const enabled = !!s && !s.preview && !s.c.readonly && [...s.c.selection].some(n => s.c.nodes.has(n.id) && M.ref(n.getData())?.role!=='exit');
@@ -242,6 +246,7 @@ module.exports = class CanvasPortal extends Plugin {
     }
     const s = { v, c, path: v.file.path, root, current: null, stack:[], archives:new Map(), menuUndos:new Map(), busy: false, switching: false, histories: new Map(), nodeUndos: new Map(), portalNodes: new Set(), nodesDirty: true, undo: [], frame: null };
     this.sessions.set(v, s);
+    if(root.canvasPortal&&this.safety)this.safety.store.preserve(s.path,JSON.stringify(root)).catch(e=>this.notifyError(e));
     const replace = (object, key, factory) => {
       const had = Object.hasOwn(object, key), original = object[key]; if (typeof original !== 'function') return;
       object[key] = factory(original); s.undo.push(() => { if (had) object[key] = original; else delete object[key]; });

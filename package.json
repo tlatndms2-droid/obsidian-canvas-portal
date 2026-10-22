@@ -1,9 +1,9 @@
 {
   "name": "canvas-portal",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "private": true,
   "scripts": {
     "build": "node scripts/build.cjs",
-    "test": "node --test tests/model.test.cjs tests/backup.test.cjs tests/navigation.test.cjs"
+    "test": "node --test tests/model.test.cjs tests/backup.test.cjs tests/navigation.test.cjs tests/safety.test.cjs"
   }
 }
