@@ -2,6 +2,45 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const box={module:{exports:{}},require:n=>n==='obsidian'?{Plugin:class{},PluginSettingTab:class{},Modal:class{}}:require(path.join(__dirname,'../src',n))};
 vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../src/main.cjs'),'utf8'),box);
 const p=Object.create(box.module.exports.prototype);
+
+test('position snapshots keep each tab viewport, ancestry and Link owner without Canvas mutations',()=>{
+ const plugin=Object.create(p),root={nodes:[],edges:[],canvasPortal:{portals:{a:{parentId:null},b:{parentId:'a'}}}},before=JSON.stringify(root);
+ const a={path:'owner.canvas',root,current:'b',c:{tx:12,ty:34,tZoom:-1},v:{leaf:{id:'owner'}}};
+ const b={path:'target.canvas',root:{nodes:[],edges:[]},current:null,c:{tx:56,ty:78,tZoom:0.25},v:{leaf:{id:'target'}},linkBack:{owner:a,id:'link'}};
+ const snapshot=JSON.parse(JSON.stringify(plugin.positionState(b)));
+ assert.deepEqual(snapshot.viewport,{x:56,y:78,zoom:0.25});assert.deepEqual(snapshot.link.owner.path,['a','b']);assert.equal(snapshot.link.ownerLeaf,'owner');assert.equal(snapshot.link.owner.file,'owner.canvas');assert.equal(JSON.stringify(root),before);
+ a.c.tx=999;assert.equal(snapshot.link.owner.viewport.x,12);
+});
+
+test('restore selects the nearest existing parent, applies exact viewport and skips missing or unrelated files',async()=>{
+ const plugin=Object.create(p),shown=[],viewports=[];
+ plugin.pendingPositions=new WeakMap();plugin.decorate=()=>{};plugin.displayData=s=>s.current;plugin.show=(s,data)=>shown.push(data);
+ const s={path:'a.canvas',v:{},root:{nodes:[{id:'entry',canvasPortalRef:{id:'a',role:'entry'}}],edges:[],canvasPortal:{portals:{a:{parentId:null,type:'select',graph:{nodes:[],edges:[]}}}}},c:{setViewport:(...args)=>viewports.push(args)}};
+ await plugin.restorePosition(s,{version:1,file:s.path,path:['a','deleted'],viewport:{x:123,y:456,zoom:-1.25}});
+ assert.equal(s.current,'a');assert.deepEqual(viewports,[[123,456,-1.25]]);assert.equal(s.restoring,false);assert.equal(plugin.pendingPositions.has(s.v),false);
+ await plugin.restorePosition(s,{file:'other.canvas',path:[]});assert.equal(shown.length,1);
+ await plugin.restorePosition(s,{file:s.path,path:['deleted'],viewport:{x:0,y:0,zoom:0}});assert.equal(s.current,null);
+});
+
+test('view state hooks preserve native state and capture restore input before the native asynchronous load',async()=>{
+ const plugin=Object.create(p);plugin.sessions=new Map();plugin.pendingPositions=new WeakMap();plugin.viewHooks=new Map();plugin.discover=()=>{};
+ const position={version:1,file:'file.canvas',path:['a'],viewport:{x:1,y:2,zoom:3}},calls=[];
+ const v={getState(){return {file:'file.canvas',viewState:{x:0,y:0,zoom:0}}},async setState(state){calls.push(plugin.pendingPositions.get(v));return 'native'}};
+ const original=v.getState;plugin.hookViewState(v);
+ assert.equal(await v.setState({file:'file.canvas',canvasPortalPosition:position}),'native');assert.equal(calls[0].file,'file.canvas');
+ assert.deepEqual(JSON.parse(JSON.stringify(v.getState().canvasPortalPosition)),position);assert.equal(v.getState().viewState.zoom,0);
+ plugin.viewHooks.get(v)();assert.equal(v.getState,original);
+});
+
+test('Link restore hydrates the existing deferred owner without creating a duplicate tab',async()=>{
+ const plugin=Object.create(p),view={},ownerView={leaf:{id:'owner'}},owner={v:ownerView,path:'owner.canvas',root:{nodes:[],edges:[],canvasPortal:{portals:{link:{id:'link',type:'link',target:'target.canvas'}}}},c:{setViewport(){}}};
+ let loads=0;const leaf={id:'owner',view:ownerView,getViewState:()=>({state:{file:'owner.canvas'}}),async loadIfDeferred(){loads++;ownerView.file={path:'owner.canvas'};plugin.sessions.set(ownerView,owner)}};
+ plugin.sessions=new Map();plugin.pendingPositions=new WeakMap();plugin.app={vault:{getAbstractFileByPath:()=>({extension:'canvas'}),read:async()=>'{"nodes":[],"edges":[]}'},workspace:{getLeavesOfType:()=>[leaf],getLeaf(){throw Error('duplicate tab')}}};
+ plugin.discover=()=>{};plugin.decorate=()=>{};plugin.show=()=>{};plugin.displayData=()=>({nodes:[],edges:[]});
+ const s={path:'target.canvas',v:view,root:{nodes:[],edges:[]},c:{setViewport(){}}};
+ await plugin.restorePosition(s,{file:s.path,path:[],viewport:{x:1,y:2,zoom:0},link:{portal:'link',ownerLeaf:'owner',owner:{file:owner.path,path:[],viewport:{x:0,y:0,zoom:0}}}});
+ assert.equal(loads,1);assert.equal(s.linkBack.owner,owner);assert.equal(s.linkBack.id,'link');
+});
 test('cross-Canvas source save failure rolls destination back and unlocks both views',async()=>{
  const plugin=Object.create(p),source={path:'source.canvas'},target={path:'target.canvas'},disk=new Map([[source.path,'source-before'],[target.path,'target-before']]),calls=[];
  const make=(file,readonly=false)=>({path:file.path,v:{file,requestSave:{cancel(){}}},c:{readonly,setReadonly(value){this.readonly=value;}}});

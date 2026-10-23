@@ -19,10 +19,10 @@ class PortalDeleteModal extends Modal {
 }
 
 class PortalNameModal extends Modal {
-  constructor(app, done) { super(app); this.done = done; }
+  constructor(app, done, initialName='새 포탈') { super(app); this.done = done; this.initialName=initialName; }
   onOpen() {
     this.contentEl.createEl('h3', { text: '포탈 만들기' });
-    let name = '새 포탈';
+    let name = this.initialName || '새 포탈';
     const setting = new Setting(this.contentEl).setName('포탈 이름').addText(t => {
       t.setValue(name).onChange(v => name = v);
       t.inputEl.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); this.close(); this.done(name); } });
@@ -71,6 +71,8 @@ module.exports = class CanvasPortal extends Plugin {
     this.settings = { glowColor: '#9966ee', backupFolder:'',autoMinutes:0, ...(await this.loadData()) };
     this.sessions = new Map();
     this.errors = [];
+    this.viewHooks=new Map();this.pendingPositions=new WeakMap();
+    this.installViewState();
     const local=require('node:path').join(process.env.LOCALAPPDATA||require('node:os').homedir(),'CanvasPortalSafety',S.hash(this.app.vault.adapter.basePath));
     this.safety=S.install(this.app.vault.adapter,local,e=>this.notifyError(e));
     this.register(()=>this.safety.dispose());
@@ -113,6 +115,76 @@ module.exports = class CanvasPortal extends Plugin {
     this.app.workspace.onLayoutReady(() => this.discover());
     this.registerInterval(window.setInterval(() => this.discover(), 1000));
     this.registerInterval(window.setInterval(()=>this.maybeAutoBackup(),10000));
+  }
+
+  installViewState(){
+    const registry=this.app.viewRegistry,original=registry.viewByType.canvas,plugin=this;
+    if(typeof original!=='function')throw Error('Canvas 탭 상태 기능을 찾을 수 없습니다.');
+    const factory=function(...args){const v=original.apply(this,args);plugin.hookViewState(v);return v;};
+    registry.viewByType.canvas=factory;
+    this.register(()=>{if(registry.viewByType.canvas===factory)registry.viewByType.canvas=original;for(const undo of this.viewHooks.values())undo();this.viewHooks.clear();});
+    for(const leaf of this.app.workspace.getLeavesOfType('canvas'))if(leaf.view.canvas)this.hookViewState(leaf.view);
+  }
+  hookViewState(v){
+    if(this.viewHooks.has(v))return;
+    const get=v.getState,set=v.setState,hadGet=Object.hasOwn(v,'getState'),hadSet=Object.hasOwn(v,'setState'),plugin=this;
+    const read=function(...args){const state=get.apply(this,args),s=plugin.sessions.get(v),position=s?plugin.positionState(s):plugin.pendingPositions.get(v);if(position)state.canvasPortalPosition=M.clone(position);return state;};
+    const write=async function(state,...args){
+      const position=state?.canvasPortalPosition;
+      plugin.pendingPositions.delete(v);
+      if(position?.version===1)plugin.pendingPositions.set(v,M.clone(position));
+      const result=await set.call(this,state,...args);
+      plugin.discover();
+      const s=plugin.sessions.get(v);
+      if(s&&position?.version===1)await plugin.restorePosition(s,position);
+      return result;
+    };
+    v.getState=read;v.setState=write;
+    this.viewHooks.set(v,()=>{if(v.getState===read){if(hadGet)v.getState=get;else delete v.getState;}if(v.setState===write){if(hadSet)v.setState=set;else delete v.setState;}});
+  }
+  positionState(s,seen=new Set()){
+    if(s.detaching)return s.lastPosition;
+    if(s.restoring)return this.pendingPositions.get(s.v);
+    if(seen.has(s)||seen.size>=32)return null;seen.add(s);
+    const path=[],visited=new Set();let id=s.current;
+    while(id&&!visited.has(id)){visited.add(id);const p=s.root.canvasPortal?.portals[id];if(!p)break;path.unshift(id);id=p.parentId;}
+    const result={version:1,file:s.path,path,viewport:{x:s.c.tx,y:s.c.ty,zoom:s.c.tZoom}};
+    if(s.linkBack){const owner=s.linkBack.owner;result.link={ownerLeaf:owner.v.leaf.id,portal:s.linkBack.id,owner:this.positionState(owner,seen)};}
+    return result;
+  }
+  requestPositionSave(s){
+    if(s.detaching||s.restoring||s.switching)return;
+    clearTimeout(s.positionTimer);
+    s.positionTimer=setTimeout(()=>{s.positionTimer=null;if(!s.detaching)this.app.workspace.requestSaveLayout();},250);
+  }
+  async restorePosition(s,position,seen=new Set()){
+    if(position.file!==s.path||seen.has(s.path)||seen.size>=32)return;
+    seen.add(s.path);s.restoring=true;this.pendingPositions.set(s.v,position);
+    try{
+      if(position.link?.owner){
+        const saved=position.link.owner,file=this.app.vault.getAbstractFileByPath(saved.file);
+        if(file?.extension==='canvas'&&!seen.has(saved.file)){
+          let owner=[...this.sessions.values()].find(o=>o.v.leaf.id===position.link.ownerLeaf&&o.path===saved.file);
+          if(!owner){const leaf=this.app.workspace.getLeavesOfType('canvas').find(l=>l.id===position.link.ownerLeaf&&(l.view.file?.path||l.getViewState().state?.file)===saved.file);if(leaf){await leaf.loadIfDeferred();this.discover();owner=this.sessions.get(leaf.view);}}
+          if(!owner){const active=this.app.workspace.activeLeaf,leaf=this.app.workspace.getLeaf('tab');await leaf.openFile(file,{active:false});this.discover();owner=this.sessions.get(leaf.view);if(active)this.app.workspace.setActiveLeaf(active,{focus:false});}
+          if(owner){
+            await this.restorePosition(owner,saved,new Set(seen));
+            const p=owner.root.canvasPortal?.portals[position.link.portal];
+            if(p?.type==='link'&&p.target===s.path){
+              const sourceText=await this.app.vault.read(s.v.file);
+              s.linkBack={owner,id:p.id,leaf:s.v.leaf,sourceText,baseline:JSON.stringify(s.root)};
+            }
+          }
+        }
+      }
+      let current=null;
+      for(const id of position.path||[]){const p=s.root.canvasPortal?.portals[id];if(!p||((p.parentId??null)!==current)||!M.space(s.root,current)?.nodes.some(n=>M.ref(n)?.role==='entry'&&M.ref(n).id===id)||p.type==='link')break;current=id;}
+      s.current=current;s.stack=[];
+      this.show(s,this.displayData(s));this.decorate(s);
+      const viewport=position.viewport;
+      if(viewport&&['x','y','zoom'].every(k=>Number.isFinite(viewport[k]))){s.c.zoomToFitQueued=false;s.c.setViewport(viewport.x,viewport.y,viewport.zoom);}
+      else s.c.zoomToFit();
+    }finally{s.restoring=false;this.pendingPositions.delete(s.v);}
   }
 
   matchesKey(e, hotkey) {
@@ -233,9 +305,10 @@ module.exports = class CanvasPortal extends Plugin {
       if (!v.canvas || !v.file || this.sessions.has(v)) continue;
       try { this.attach(v); } catch (e) { this.notifyError(e); }
     }
-    for (const [v, s] of this.sessions) if (!v.containerEl.isConnected) { this.detach(s); this.sessions.delete(v); }
+    for (const [v, s] of this.sessions) if (!v.containerEl.isConnected) { this.detach(s); this.sessions.delete(v);const undo=this.viewHooks.get(v);undo?.();this.viewHooks.delete(v); }
   }
   attach(v) {
+    this.hookViewState(v);
     const c = v.canvas;
     if (!c.getData || !c.importData || !v.getViewData) throw Error('이 Obsidian의 Canvas 기능을 지원하지 않습니다.');
     const root = M.clone(c.getData());
@@ -246,11 +319,14 @@ module.exports = class CanvasPortal extends Plugin {
     }
     const s = { v, c, path: v.file.path, root, current: null, stack:[], archives:new Map(), menuUndos:new Map(), busy: false, switching: false, histories: new Map(), nodeUndos: new Map(), portalNodes: new Set(), nodesDirty: true, undo: [], frame: null };
     this.sessions.set(v, s);
-    if(root.canvasPortal&&this.safety)this.safety.store.preserve(s.path,JSON.stringify(root)).catch(e=>this.notifyError(e));
+    if(root.canvasPortal&&this.safety){s.migrationReady=this.safety.store.preserve(s.path,JSON.stringify(root));s.migrationReady.catch(e=>this.notifyError(e));}
+    M.normalizeGroups(root);
     const replace = (object, key, factory) => {
       const had = Object.hasOwn(object, key), original = object[key]; if (typeof original !== 'function') return;
       object[key] = factory(original); s.undo.push(() => { if (had) object[key] = original; else delete object[key]; });
     };
+    replace(v,'save',original=>async(...args)=>{await s.migrationReady;return original.apply(v,args);});
+    replace(c,'markViewportChanged',original=>(...args)=>{const result=original.apply(c,args);this.requestPositionSave(s);return result;});
     replace(v, 'getViewData', original => () => {
       if (s.switching) return JSON.stringify(s.root);
       if (v.file?.path !== s.path) { s.path = v.file?.path; s.current = null; s.histories.clear(); s.root = M.clone(c.getData()); }
@@ -265,6 +341,7 @@ module.exports = class CanvasPortal extends Plugin {
       if(s.lifecycleWriting)return;
       const parsed = JSON.parse(text);
       if (parsed.canvasPortal && parsed.canvasPortal.version !== 1) throw Error('지원하지 않는 포탈 데이터 버전');
+      if(Object.values(parsed.canvasPortal?.portals||{}).some(p=>p.type==='group')){s.migrationReady=this.safety.store.preserve(v.file.path,text);s.migrationReady.catch(e=>this.notifyError(e));M.normalizeGroups(parsed);text=JSON.stringify(parsed);}
       // A save from another tab reloads this view too. Keep its current portal
       // and camera when that space still exists in the same Canvas.
       const sameFile=s.path===v.file?.path,current=sameFile&&s.current&&parsed.canvasPortal?.portals[s.current]?s.current:null;
@@ -482,7 +559,13 @@ module.exports = class CanvasPortal extends Plugin {
       if (!r || !p || !n.nodeEl) continue;
       n.nodeEl.classList.add('cp-portal', r.role === 'entry' ? 'cp-entry' : 'cp-exit');
       let marker = n.nodeEl.querySelector(':scope > .cp-marker');
-      if (!marker) { marker = document.createElement('div'); marker.className = 'cp-marker'; n.nodeEl.appendChild(marker); if (r.role === 'entry') { const icon = marker.createSpan({ cls: 'cp-enter-icon' }); setIcon(icon, p.type==='link'?'link':p.type==='group'?'group':'log-in');icon.setAttribute('aria-label',p.type==='link'?'Link 포탈':p.type==='group'?'Group 포탈':'입장 포탈'); } marker.createSpan({ cls: 'cp-display-id', text: p.displayId }); }
+      if (!marker) { marker = document.createElement('div'); marker.className = 'cp-marker'; n.nodeEl.appendChild(marker); if (r.role === 'entry') { const icon = marker.createSpan({ cls: 'cp-enter-icon' }); setIcon(icon, p.type==='link'?'link':'log-in');icon.setAttribute('aria-label',p.type==='link'?'Link 포탈':'입장 포탈'); } marker.createSpan({ cls: 'cp-display-id', text: p.displayId }); }
+      const styled=r.role==='entry'&&p.type!=='link';
+      n.nodeEl.classList.toggle('cp-large-entry',styled);
+      let large=n.nodeEl.querySelector(':scope > .cp-large-icon');
+      if(styled&&!large){large=n.nodeEl.createDiv({cls:'cp-large-icon',attr:{'aria-hidden':'true'}});setIcon(large,'log-in');}
+      if(!styled)large?.remove();
+      if(styled){const width=Math.max(1,n.width),height=Math.max(1,n.height),size=Math.max(8,Math.min(64,width*.20,height*.45)),gap=Math.max(4,Math.min(24,width*.07));n.nodeEl.style.setProperty('--cp-icon-size',size+'px');n.nodeEl.style.setProperty('--cp-icon-gap',gap+'px');}
       const id = marker.querySelector('.cp-display-id'); if (id.textContent !== p.displayId) id.textContent = p.displayId;
       if(p.type==='link'){
         let filename=marker.querySelector('.cp-link-filename');
@@ -496,7 +579,7 @@ module.exports = class CanvasPortal extends Plugin {
         patch('setData', original => (data, ...args) => {
           if (r.role === 'exit') data = { ...data, text: M.cardText(p.name, p.displayId), canvasPortalRef: r };
           else if (data.text != null) { p.name = M.title(data.text); data = { ...data, text: M.cardText(p.name, p.displayId), canvasPortalRef: r }; }
-          return original.call(n, data, ...args);
+          const result=original.call(n, data, ...args);this.queue(s);return result;
         });
         {
           let child = null, restoreChild = null;
@@ -523,7 +606,7 @@ module.exports = class CanvasPortal extends Plugin {
           if(r.role==='exit')patch('setColor', _original => () => {});
         }
         patch('convertToFile', _original => () => { new Notice('포탈 카드는 Markdown 파일로 변환할 수 없습니다.'); });
-        const restore = () => { restorers.reverse().forEach(fn => fn()); n.nodeEl?.classList.remove('cp-portal', 'cp-entry', 'cp-exit'); marker.remove(); };
+        const restore = () => { restorers.reverse().forEach(fn => fn()); n.nodeEl?.classList.remove('cp-portal', 'cp-entry', 'cp-exit','cp-large-entry');n.nodeEl?.querySelector(':scope > .cp-large-icon')?.remove();n.nodeEl?.style.removeProperty('--cp-icon-size');n.nodeEl?.style.removeProperty('--cp-icon-gap'); marker.remove(); };
         restore.record = p; restore.role = r.role;
         s.nodeUndos.set(n, restore);
       }
@@ -532,9 +615,8 @@ module.exports = class CanvasPortal extends Plugin {
   askCreate(s) {
     if(s.preview)return;
     const selected=[...s.c.selection].map(n=>n.getData());
-    if(selected.length===1&&selected[0].type==='group'){this.create(s,selected[0].label);return;}
     if(selected.length===1&&selected[0].type==='file'&&selected[0].file.toLowerCase().endsWith('.canvas')){this.create(s,M.fileTitle(selected[0].file));return;}
-    new PortalNameModal(this.app, name => this.create(s, name)).open();
+    new PortalNameModal(this.app, name => this.create(s, name),selected.length===1&&selected[0].type==='group'?selected[0].label:'새 포탈').open();
   }
   async create(s, name) {
     if (s.busy) return; s.busy = true;
@@ -542,14 +624,6 @@ module.exports = class CanvasPortal extends Plugin {
       this.flushEditors(s);this.capture(s);
       const ids = [...s.c.selection].filter(n => s.c.nodes.has(n.id)).map(n => n.id);
       const { root, entryId, portalId } = M.createPortal(s.root, ids, name,s.current); M.validate(root);
-      if(root.canvasPortal.portals[portalId].type==='group'){
-        const probe=document.createElement('div');
-        probe.textContent=root.canvasPortal.portals[portalId].name;
-        probe.style.cssText='position:absolute;visibility:hidden;pointer-events:none;box-sizing:border-box;width:max-content;min-width:120px;max-width:360px;padding:16px 24px;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--font-text);font-size:var(--font-text-size,16px);line-height:var(--line-height-normal,1.5);';
-        s.c.wrapperEl.appendChild(probe);
-        try { const entry=M.space(root,s.current).nodes.find(n=>n.id===entryId);entry.width=Math.ceil(probe.offsetWidth);entry.height=Math.max(64,Math.ceil(probe.offsetHeight)); }
-        finally { probe.remove(); }
-      }
       await this.commitRoot(s,root,[entryId]);new Notice('포탈을 만들었습니다. Ctrl+Enter로 입장하세요.');
     } catch (e) { this.notifyError(e); } finally { s.busy = false; }
   }
@@ -776,6 +850,8 @@ module.exports = class CanvasPortal extends Plugin {
   }
   cancelPreview(s){if(!s.preview)return;s.preview.host.remove();s.preview=null;s.c.wrapperEl.focus();}
   detach(s) {
+    s.lastPosition=this.positionState(s);s.detaching=true;
+    clearTimeout(s.positionTimer);this.pendingPositions.set(s.v,s.lastPosition);
     s.deleteModal?.close();
     this.cancelPreview(s);
     if (s.frame != null) cancelAnimationFrame(s.frame);
@@ -794,5 +870,5 @@ module.exports = class CanvasPortal extends Plugin {
     s.undo.reverse().forEach(fn => fn()); s.c.wrapperEl.style.removeProperty('--cp-glow');
     if (s.frame != null) cancelAnimationFrame(s.frame);
   }
-  onunload(){for(const s of this.sessions.values()){try{this.flushEditors(s);this.capture(s);}catch(e){this.notifyError(e);}}for(const s of this.sessions.values()){if(s.linkBack){s.preservedSource=s.linkBack;s.linkBack=null;if(!s.current)this.show(s,s.root);}this.detach(s);}this.sessions.clear();}
+  onunload(){for(const s of this.sessions.values()){s.lastPosition=this.positionState(s);this.pendingPositions.set(s.v,s.lastPosition);try{this.flushEditors(s);this.capture(s);}catch(e){this.notifyError(e);}}this.app.workspace.saveLayout();for(const s of this.sessions.values()){s.detaching=true;if(s.linkBack){s.preservedSource=s.linkBack;s.linkBack=null;if(!s.current)this.show(s,s.root);}this.detach(s);}this.sessions.clear();}
 };

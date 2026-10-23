@@ -63,11 +63,11 @@ test('empty selection fails, existing portal can be wrapped without changing inp
   const nested=M.createSelect(one.root,[one.entryId],'상위');assert.equal(JSON.stringify(one.root),saved);
   assert.equal(nested.root.canvasPortal.portals[one.portalId].parentId,nested.portalId);M.validate(nested.root);
 });
-test('Group becomes the entry, current content restores in a sized group, empty group stays',()=>{
+test('group selection makes an ordinary portal and keeps the original frame including empty groups',()=>{
   const input=data();input.nodes.push({id:'group',type:'group',label:'그룹',x:-20,y:-20,width:550,height:280});
-  const result=M.createPortal(input,['group'],'그룹 포탈');const p=result.root.canvasPortal.portals[result.portalId];assert.equal(p.type,'group');assert.equal(result.entryId,'group');assert.equal(p.graph.nodes.length,3);
+  const result=M.createPortal(input,['group'],'그룹 포탈');const p=result.root.canvasPortal.portals[result.portalId];assert.equal(p.type,'select');assert.notEqual(result.entryId,'group');assert.equal(p.graph.nodes.length,4);
   p.graph.nodes.find(n=>n.id==='b').x=900;
-  const restored=M.unportal(result.root,[p.id]);const g=restored.root.nodes.find(n=>n.id==='group');assert.equal(g.type,'group');assert.ok(g.width>1000);assert.equal(restored.root.nodes.find(n=>n.id==='b').x,900);
+  const restored=M.unportal(result.root,[p.id]);const g=restored.root.nodes.find(n=>n.id==='group');assert.deepEqual(g,input.nodes.find(n=>n.id==='group'));assert.equal(restored.root.nodes.find(n=>n.id==='b').x,900);
   const empty=M.createPortal({nodes:[{id:'g',type:'group',label:'빈 그룹',x:0,y:0,width:400,height:300}],edges:[]},['g'],'빈 그룹');const out=M.unportal(empty.root,[empty.portalId]);assert.equal(out.root.nodes[0].type,'group');assert.equal(out.root.nodes.length,1);
 });
 test('Link keeps the same entry identity and file reference, stores only its exit, detach keeps current geometry',()=>{
@@ -123,30 +123,48 @@ test('renaming a referenced folder updates hidden file cards without renaming po
   assert.equal(p.name,'내 포탈');
 });
 
-test('Group name comes from its label, including nested groups and unnamed fallback',()=>{
+test('group label is the default portal name but an explicit name is respected',()=>{
   for(const label of ['기획 자료', '', undefined]){
     const input={nodes:[{id:'g',type:'group',label,x:0,y:0,width:400,height:300}],edges:[]};
-    const made=M.createPortal(input,['g'],'이름을 덮어쓰면 안 됨'),p=made.root.canvasPortal.portals[made.portalId];
+    const made=M.createPortal(input,['g']),p=made.root.canvasPortal.portals[made.portalId];
     assert.equal(p.name,label||'새 포탈');
     assert.equal(M.title(made.root.nodes[0].text),p.name);
-    assert.equal(M.title(p.graph.nodes[0].text),p.name);
+    assert.equal(M.title(p.graph.nodes.find(n=>n.id===p.exitId).text),p.name);
+    const renamed=M.createPortal(input,['g'],'직접 정한 이름');assert.equal(renamed.root.canvasPortal.portals[renamed.portalId].name,'직접 정한 이름');
   }
   const input={nodes:[{id:'g',type:'group',label:'내부 그룹',x:0,y:0,width:400,height:300}],edges:[]};
   const parent=M.createSelect(input,['g'],'상위');
   const child=M.createPortal(parent.root,['g'],'다른 이름',parent.portalId);
-  assert.equal(child.root.canvasPortal.portals[child.portalId].name,'내부 그룹');
+  assert.equal(child.root.canvasPortal.portals[child.portalId].name,'다른 이름');
 });
 
-test('Group entry does not retain large group dimensions; restore still encloses its contents',()=>{
+test('group and card geometry stay exact while the new entry uses ordinary dimensions',()=>{
  const group={id:'g',type:'group',label:'기획',x:-20,y:-40,width:2000,height:1400};
  const child={id:'n',type:'text',text:'자료',x:1000,y:700,width:240,height:140};
  const made=M.createPortal({nodes:[group,child],edges:[]},['g']);
  const entry=made.root.nodes[0],p=made.root.canvasPortal.portals[made.portalId];
  assert.ok(entry.width<group.width&&entry.height<group.height);
- assert.equal(entry.x,group.x);assert.equal(entry.y,group.y);
- assert.deepEqual(p.originalEntry,group);assert.deepEqual(p.graph.nodes.find(n=>n.id==='n'),child);
+ assert.notEqual(entry.id,group.id);
+ assert.equal(p.originalEntry,null);assert.deepEqual(p.graph.nodes.find(n=>n.id==='g'),group);assert.deepEqual(p.graph.nodes.find(n=>n.id==='n'),child);
  const restored=M.restoreItems(made.root,made.portalId),g=restored.nodes.find(n=>n.id==='g');
  assert.ok(g.x<=child.x&&g.y<=child.y&&g.x+g.width>=child.x+child.width&&g.y+g.height>=child.y+child.height);
+});
+
+test('legacy group conversion is immutable, idempotent, preserves portal identity and rewires frame lines',()=>{
+ const entry={id:'g',type:'text',text:M.cardText('기존 그룹','P-01'),x:0,y:0,width:280,height:160,canvasPortalRef:{id:'p',role:'entry'}};
+ const legacy={nodes:[entry],edges:[],canvasPortal:{version:1,canvasId:'canvas',portals:{p:{id:'p',type:'group',parentId:null,name:'기존 그룹',displayId:'P-01',entryId:'g',exitId:'exit',originalEntry:{id:'g',type:'group',label:'옛 이름',x:0,y:0,width:500,height:400,color:'3'},graph:{nodes:[{id:'n',type:'text',text:'내용',x:100,y:80,width:200,height:100},{id:'exit',type:'text',text:'기존 그룹',x:-300,y:-200,width:280,height:160,canvasPortalRef:{id:'p',role:'exit'}}],edges:[{id:'line',fromNode:'exit',toNode:'n',label:'그룹 연결'}]}}}}};
+ const before=JSON.stringify(legacy),root=M.rootData(legacy),p=root.canvasPortal.portals.p,g=p.graph.nodes.find(n=>n.type==='group');
+ assert.equal(JSON.stringify(legacy),before);assert.equal(p.type,'select');assert.equal(p.entryId,'g');assert.equal(p.exitId,'exit');assert.notEqual(g.id,p.entryId);assert.equal(g.color,'3');assert.equal(g.label,p.name);
+ assert.equal(p.graph.edges[0].fromNode,g.id);assert.equal(p.graph.edges[0].label,'그룹 연결');assert.deepEqual(root.nodes,legacy.nodes);M.validate(root);
+ assert.equal(M.normalizeGroups(root),false);assert.deepEqual(M.rootData(root),root);
+ const copy=M.clonePortal(root,'p');M.validate(copy.root);assert.equal(M.restoreItems(root,'p').nodes.length,2);
+});
+
+test('overlapping multiple groups include contained cards once and preserve group-edge identity',()=>{
+ const a={id:'g1',type:'group',label:'A',x:-20,y:-20,width:600,height:400},b={...a,id:'g2',label:'B',x:-10,y:-10};
+ const input=data();input.nodes.push(a,b);input.edges.push({id:'frame',fromNode:'g1',toNode:'a'});
+ const made=M.createPortal(input,['g1','g2','a'],'통합'),p=made.root.canvasPortal.portals[made.portalId];
+ assert.equal(p.type,'select');assert.equal(p.graph.nodes.filter(n=>n.id==='a').length,1);assert.ok(p.graph.nodes.some(n=>n.id==='g2'));assert.ok(p.graph.edges.some(e=>e.id==='frame'&&e.fromNode==='g1'));M.validate(made.root);
 });
 test('portal editor preserves spaces, blank text and trailing newlines through saved ID round trips', () => {
   for (const text of ['', ' ', '첫 줄 ', '첫 줄\n', '첫 줄\n\n', '첫 줄\n둘째 줄 ', '  한글  ']) {

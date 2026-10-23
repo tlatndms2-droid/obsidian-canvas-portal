@@ -12,7 +12,24 @@ function rootData(data) {
   if (!Array.isArray(root.nodes) || !Array.isArray(root.edges)) throw Error('Canvas 형식이 올바르지 않습니다.');
   if (root.canvasPortal && root.canvasPortal.version !== 1) throw Error('지원하지 않는 포탈 데이터 버전입니다.');
   root.canvasPortal ??= { version: 1, canvasId: uid(), portals: {} };
+  normalizeGroups(root);
   return root;
+}
+
+// Legacy groups used the original group ID for their entry card. Give the
+// restored interior frame its own ID without changing portal/navigation IDs.
+function normalizeGroups(root) {
+  let changed=false;
+  for(const p of Object.values(root.canvasPortal?.portals||{}))if(p.type==='group'){
+    if(!p.originalEntry||p.originalEntry.type!=='group')throw Error('기존 그룹 정보가 없어 변환을 중단했습니다.');
+    const group=clone(p.originalEntry),nodes=p.graph.nodes.filter(n=>n.id!==p.exitId),b=bounds(nodes);
+    group.id=uid();group.label=p.name;
+    if(nodes.length)Object.assign(group,{x:b.x-24,y:b.y-48,width:b.width+48,height:b.height+72});
+    p.graph.nodes.unshift(group);
+    p.graph.edges=p.graph.edges.map(e=>({...e,fromNode:e.fromNode===p.exitId?group.id:e.fromNode,toNode:e.toNode===p.exitId?group.id:e.toNode}));
+    p.type='select';p.originalEntry=null;changed=true;
+  }
+  return changed;
 }
 
 const space = (root, parentId = null) => parentId ? root.canvasPortal.portals[parentId]?.graph : root;
@@ -32,7 +49,7 @@ function createPortal(data, selectedIds, name, parentId=null, requestedType=null
   const ids = new Set(selectedIds);
   // Canvas groups are spatial containers. Include their contained nodes when selected.
   const direct=parent.nodes.filter(n=>ids.has(n.id)&&ref(n)?.role!=='exit');
-  const type=requestedType || (direct.length===1&&direct[0].type==='group'?'group':direct.length===1&&direct[0].type==='file'&&direct[0].file.toLowerCase().endsWith('.canvas')?'link':'select');
+  const type=requestedType==='link'||(!requestedType&&direct.length===1&&direct[0].type==='file'&&direct[0].file.toLowerCase().endsWith('.canvas'))?'link':'select';
   for (const n of parent.nodes) if (ids.has(n.id) && n.type === 'group') {
     for (const child of parent.nodes) if (child.x >= n.x && child.y >= n.y && child.x + child.width <= n.x + n.width && child.y + child.height <= n.y + n.height) ids.add(child.id);
   }
@@ -45,7 +62,7 @@ function createPortal(data, selectedIds, name, parentId=null, requestedType=null
   const maxY = Math.max(...selected.map(n => n.y + n.height));
   const portalId = uid(), entryId = type==='select'?uid():direct[0].id, exitId = uid();
   const displayId = nextId(root);
-  const portalName = type==='link'?fileTitle(direct[0].file):(title(type==='group'?direct[0].label:name).trim() || '새 포탈');
+  const portalName = type==='link'?fileTitle(direct[0].file):(title(name??(direct.length===1&&direct[0].type==='group'?direct[0].label:'')).trim() || '새 포탈');
   const entry = { id: entryId, type: 'text', x: (minX + maxX) / 2 - 140, y: (minY + maxY) / 2 - 80, width: 280, height: 160, text: cardText(portalName, displayId), canvasPortalRef: { id: portalId, role: 'entry' } };
   const exit = { id: exitId, type: 'text', x: minX - 320, y: minY - 190, width: 280, height: 160, text: cardText(portalName, displayId), canvasPortalRef: { id: portalId, role: 'exit' } };
   const originalEntry=type==='select'?null:clone(direct[0]);
@@ -54,8 +71,8 @@ function createPortal(data, selectedIds, name, parentId=null, requestedType=null
   const internalEdges = parent.edges.filter(e => ids.has(e.fromNode) && ids.has(e.toNode));
   parent.edges = parent.edges.filter(e => !internalEdges.includes(e)).map(e => ({ ...e, fromNode: ids.has(e.fromNode) ? entryId : e.fromNode, toNode: ids.has(e.toNode) ? entryId : e.toNode }));
   parent.nodes = [...parent.nodes.filter(n => !ids.has(n.id)), entry];
-  const moved=type==='link'?[]:selected.filter(n=>type!=='group'||n.id!==entryId);
-  root.canvasPortal.portals[portalId] = { id:portalId,type,parentId,displayId,name:portalName,entryId,exitId,originalEntry,target:type==='link'?originalEntry.file:null,graph:{nodes:[...clone(moved),exit],edges:type==='link'?[]:clone(internalEdges).map(e=>({...e,fromNode:type==='group'&&e.fromNode===entryId?exitId:e.fromNode,toNode:type==='group'&&e.toNode===entryId?exitId:e.toNode}))} };
+  const moved=type==='link'?[]:selected;
+  root.canvasPortal.portals[portalId] = { id:portalId,type,parentId,displayId,name:portalName,entryId,exitId,originalEntry,target:type==='link'?originalEntry.file:null,graph:{nodes:[...clone(moved),exit],edges:type==='link'?[]:clone(internalEdges)} };
   for(const n of moved){const r=ref(n);if(r?.role==='entry')root.canvasPortal.portals[r.id].parentId=portalId;}
   validate(root);
   return { root, portalId, entryId };
@@ -89,12 +106,6 @@ function restoreItems(root,id) {
   if(p.type==='link'){const entry=space(root,p.parentId).nodes.find(n=>n.id===p.entryId);return {nodes:[{...clone(p.originalEntry),x:entry.x,y:entry.y,width:entry.width,height:entry.height}],edges:[]};}
   const nodes=clone(p.graph.nodes.filter(n=>n.id!==p.exitId));
   let edges=clone(p.graph.edges.filter(e=>e.fromNode!==p.exitId&&e.toNode!==p.exitId));
-  if(p.type==='group'){
-    const group=clone(p.originalEntry),b=bounds(nodes);group.label=p.name;
-    if(nodes.length)Object.assign(group,{x:b.x-24,y:b.y-48,width:b.width+48,height:b.height+72});
-    nodes.unshift(group);
-    edges=clone(p.graph.edges).map(e=>({...e,fromNode:e.fromNode===p.exitId?group.id:e.fromNode,toNode:e.toNode===p.exitId?group.id:e.toNode}));
-  }
   return {nodes,edges};
 }
 function unportal(data,ids,parentId=null,offset={x:0,y:0},deleteIds=[]) {
@@ -184,4 +195,4 @@ function movePortals(data,ids,parentId=null,destinationId=null,destinationData=n
   if(destinationData)for(const id of moving)delete source.canvasPortal.portals[id];
   validate(source);validate(target);return {root:source,target,nodes,edges};
 }
-module.exports = { clone, uid, ref, graph, title, cardText, fileTitle, syncLinkNames, rootData, createSelect, createPortal, space, bounds, overlaps, clonePortal, descendants, restoreItems, unportal, pasteTransfer, validate, deletePortals, movePortals, selectedEntries };
+module.exports = { clone, uid, ref, graph, title, cardText, fileTitle, syncLinkNames, normalizeGroups, rootData, createSelect, createPortal, space, bounds, overlaps, clonePortal, descendants, restoreItems, unportal, pasteTransfer, validate, deletePortals, movePortals, selectedEntries };
